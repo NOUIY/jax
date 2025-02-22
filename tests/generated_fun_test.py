@@ -1,4 +1,4 @@
-# Copyright 2018 Google LLC
+# Copyright 2018 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,11 +22,11 @@ from absl.testing import parameterized
 
 import itertools as it
 import jax.numpy as jnp
+import jax
 from jax import jit, jvp, vjp
 import jax._src.test_util as jtu
 
-from jax.config import config
-config.parse_flags_with_absl()
+jax.config.parse_flags_with_absl()
 
 npr.seed(0)
 
@@ -221,7 +221,7 @@ def check_close(x, y, tol=1e-3):
   # TODO(dougalm): re-enable once we've tackled the less pendantic bugs
   # assert x.dtype == y.dtype
   assert jnp.allclose(x, y, rtol=tol, atol=tol), \
-     "Value mismatch:\n{}\n  vs\n{}\n".format(x, y)
+     f"Value mismatch:\n{x}\n  vs\n{y}\n"
 
 def partial_argnums(f, args, dyn_argnums):
   fixed_args = [None if i in dyn_argnums else arg for i, arg in enumerate(args)]

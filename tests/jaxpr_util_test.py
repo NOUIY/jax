@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2020 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,17 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from absl.testing import absltest
-
+import os
 import gzip
 import json
-import unittest
 
-from jax import jaxpr_util, jit, make_jaxpr, numpy as jnp
-import jax._src.lib
-from jax._src.lib import xla_client
+from absl.testing import absltest
+
+import jax
+from jax import jit, make_jaxpr, numpy as jnp
+from jax._src import config
+from jax._src import jaxpr_util
 from jax._src import test_util as jtu
-from jax.config import config
+from jax._src.lib import xla_client
 
 
 config.parse_flags_with_absl()
@@ -37,7 +38,9 @@ class JaxprStatsTest(jtu.JaxTestCase):
 
     hist = jaxpr_util.primitives(make_jaxpr(f)(1., 1.).jaxpr)
 
-    for k in ['add', 'sin', 'cos', 'xla_call']:
+    primitives = ['add', 'sin', 'cos']
+    primitives.append('pjit')
+    for k in primitives:
       assert k in hist, k
     self.assertEqual(hist['sin'], 2)
     self.assertTrue(all(count == 1 for k, count in hist.items() if k != 'sin'))
@@ -58,20 +61,20 @@ class JaxprStatsTest(jtu.JaxTestCase):
   def test_primitives_by_shape(self):
     def f(x, y):
       def sub(x, y):
-        return jnp.sum(jnp.array([x, y])), y
-      s, _ = jit(sub)(x, y)
+        return jnp.sum(jnp.array([x, y]))
+      s = jit(sub)(x, y)
       return jnp.sin(s) + jnp.cos(y)
 
     hist = jaxpr_util.primitives_by_shape(make_jaxpr(f)(1., 1.).jaxpr)
 
-    t = '64' if config.x64_enabled else '32'
+    t = '64' if config.enable_x64.value else '32'
     shapes = [
         f'add :: float{t}[]',
         f'sin :: float{t}[]',
         f'cos :: float{t}[]',
         f'reduce_sum :: float{t}[]',
         f'concatenate :: float{t}[2]',
-        f'xla_call :: float{t}[] *',
+        f'pjit :: float{t}[]',
     ]
     for k in shapes:
       self.assertEqual(hist[k], 1)
@@ -84,6 +87,17 @@ class JaxprStatsTest(jtu.JaxTestCase):
     hist = jaxpr_util.source_locations(make_jaxpr(f)(1., 1.).jaxpr)
     self.assertEqual(sum(hist.values()), 4)
 
+  def test_source_locations_exclude_contextlib(self):
+
+    def f(x):
+      # This generates a stack where the most recent non-jax frame
+      # comes from contextlib.
+      return jax.named_call(jnp.cos, name='test')(x)
+
+    hist = jaxpr_util.source_locations(make_jaxpr(f)(jnp.arange(8.)).jaxpr)
+    for filename in hist.keys():
+      self.assertIn(os.path.basename(__file__), filename)
+
   def test_print_histogram(self):
     def f(x, y):
       s = jit(jnp.sin)(x)
@@ -91,8 +105,6 @@ class JaxprStatsTest(jtu.JaxTestCase):
     hist = jaxpr_util.primitives_by_source(make_jaxpr(f)(1., 1.).jaxpr)
     jaxpr_util.print_histogram(hist)
 
-  @unittest.skipIf(jax._src.lib.xla_extension_version < 53,
-                   "Test requires jaxlib 0.1.76")
   def test_pprof_equation_profile(self):
     def f(x, y):
       s = jit(jnp.sin)(x)

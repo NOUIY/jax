@@ -1,4 +1,4 @@
-# Copyright 2019 Google LLC
+# Copyright 2019 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -24,19 +24,14 @@ from jax._src import api
 from jax._src import test_util as jtu
 from jax import numpy as jnp
 from jax.experimental import pjit
-import jax._src.lib
+from jax.experimental.shard_map import shard_map
+from jax.sharding import PartitionSpec as P
 
-from jax.config import config
-config.parse_flags_with_absl()
+jax.config.parse_flags_with_absl()
 
+
+@jtu.with_config(jax_debug_nans=True)
 class DebugNaNsTest(jtu.JaxTestCase):
-
-  def setUp(self):
-    self.cfg = config._read("jax_debug_nans")
-    config.update("jax_debug_nans", True)
-
-  def tearDown(self):
-    config.update("jax_debug_nans", self.cfg)
 
   def testSinc(self):
     # Regression test for #6936
@@ -63,8 +58,8 @@ class DebugNaNsTest(jtu.JaxTestCase):
       ans = jax.jit(lambda x: 0. / x)(A)
       ans.block_until_ready()
 
+  @jax.debug_nans(False)
   def testJitComputationNaNContextManager(self):
-    config.update("jax_debug_nans", False)
     A = jnp.array(0.)
     f = jax.jit(lambda x: 0. / x)
     ans = f(A)
@@ -80,24 +75,42 @@ class DebugNaNsTest(jtu.JaxTestCase):
       ans = 0. / A
       ans.block_until_ready()
 
-  def testCallDeoptimized(self):
-    for jit in [api._python_jit, api._cpp_jit]:
+  @jtu.sample_product(jit=jtu.JIT_IMPLEMENTATION)
+  def testCallDeoptimized(self, jit):
+    @jit
+    def f(x):
+      return jax.lax.cond(
+          x == 1, lambda _: np.nan, lambda _: 2., operand=None)
 
-      @jit
-      def f(x):
-        return jax.lax.cond(
-            x == 1, lambda _: np.nan, lambda _: 2., operand=None)
+    # This makes sure, when using the C++ jit, that the Python code has been
+    # run to compile, and the next call won't go through `cache_miss`.
+    f(2)
+    # 'cond' not 'xla_call'
+    msg = r"invalid value \(nan\) encountered in .*cond.*"
+    with self.assertRaisesRegex(FloatingPointError, msg):
+      f(1)
 
-      # This makes sure, when using the C++ jit, that the Python code has been
-      # run to compile, and the next call won't go through `cache_miss`.
-      f(2)
-      # 'cond' not 'xla_call'
-      msg = r"invalid value \(nan\) encountered in cond"
-      with self.assertRaisesRegex(FloatingPointError, msg):
-        f(1)
+  def testShardMap(self):
+    mesh = jax.make_mesh((1,), ('x',))
+    f = shard_map(lambda x: 0. / x, mesh=mesh, in_specs=(P('x')), out_specs=P('x'))
+    # For the Cpp pmap, the first execution always goes through Python.
+    f(jnp.array([1.]))
+
+    with self.assertRaisesRegex(
+        FloatingPointError,
+        r"Invalid value \(nan\) encountered in sharded computation"):
+      ans = f(jnp.array([0.]))
+      ans.block_until_ready()
+
+    if jax.device_count() >= 2:
+      with self.assertRaisesRegex(
+          FloatingPointError,
+          r"Invalid value \(nan\) encountered in sharded computation"):
+        ans = f(jnp.array([1., 0.]))
+        ans.block_until_ready()
 
   def testPmap(self):
-    pmap_funcs = [api._python_pmap, api._cpp_pmap]
+    pmap_funcs = [api._cpp_pmap]
 
     for pmap in pmap_funcs:
       f = pmap(lambda x: 0. / x)
@@ -106,69 +119,120 @@ class DebugNaNsTest(jtu.JaxTestCase):
 
       with self.assertRaisesRegex(
           FloatingPointError,
-          r"invalid value \(nan\) encountered in parallel computation"):
+          r"invalid value \(nan\) encountered in div"):
         ans = f(jnp.array([0.]))
         ans.block_until_ready()
 
       if jax.device_count() >= 2:
         with self.assertRaisesRegex(
             FloatingPointError,
-            r"invalid value \(nan\) encountered in parallel computation"):
+            r"Invalid value \(nan\) encountered in parallel computation"):
           ans = f(jnp.array([1., 0.]))
           ans.block_until_ready()
+
+  def testGradPmap(self):
+    @jax.jit
+    def f(x):
+      y = x**2
+      return jnp.log(y)
+
+    _, f_vjp = jax.vjp(jax.pmap(f), jnp.zeros([1]))
+
+    with self.assertRaisesRegex(
+        FloatingPointError,
+        r"invalid value \(nan\) encountered in mul\nWhen differentiating"):
+      ans, = f_vjp(jnp.ones([1]))
+      ans.block_until_ready()
+
+  def testGradShardMap(self):
+    @jax.jit
+    def f(x):
+      y = x**2
+      return jnp.log(y)
+
+    mesh = jax.make_mesh((1,), ('x',))
+    shmap_f = shard_map(f, mesh=mesh, in_specs=(P('x')), out_specs=P('x'))
+    _, f_vjp = jax.vjp(shmap_f, jnp.zeros([1]))
+
+    with self.assertRaisesRegex(
+        FloatingPointError,
+        r"invalid value \(nan\) encountered in mul\nWhen differentiating"):
+      ans, = f_vjp(jnp.ones([1]))
+      ans.block_until_ready()
 
   def testPmapNoNaN(self):
     ans = jax.pmap(lambda x: 0. / x)(jnp.array([1.]))
     ans.block_until_ready()
 
   @jtu.ignore_warning(message=".*is an experimental.*")
-  def testXmap(self):
-
-    f = jax.experimental.maps.xmap(
-        lambda x: 0. / x,
-        in_axes=['i'],
-        out_axes=['i'],
-        axis_resources={'i': 'x'})
-
-    with jax.experimental.maps.Mesh(np.array(jax.local_devices()[:1]), ('x',)):
-      with self.assertRaisesRegex(
-          FloatingPointError,
-          r"invalid value \(nan\) encountered in parallel computation"):
-        ans = f(jnp.array([0.]))
-        ans.block_until_ready()
-
-    if jax.device_count() >= 2:
-      with jax.experimental.maps.Mesh(np.array(jax.local_devices()[:2]), ('x',)):
-        with self.assertRaises(FloatingPointError):
-          ans = f(jnp.array([1., 0.]))
-          ans.block_until_ready()
-
-  @jtu.ignore_warning(message=".*is an experimental.*")
-  @jtu.skip_on_devices("cpu", "gpu")
   def testPjit(self):
     if jax.device_count() < 2:
       raise SkipTest("test requires >=2 devices")
 
-    p = jax.experimental.PartitionSpec('x')
-    f = pjit.pjit(lambda x: 0. / x,
-                  in_axis_resources=p,
-                  out_axis_resources=p)
+    p = jax.sharding.PartitionSpec('x')
+    f = pjit.pjit(lambda x: 0. / x, in_shardings=p, out_shardings=p)
 
-    with jax.experimental.maps.Mesh(np.array(jax.local_devices()[:2]), ('x',)):
+    with jax.sharding.Mesh(np.array(jax.local_devices()[:2]), ('x',)):
       with self.assertRaises(FloatingPointError):
         ans = f(jnp.array([0., 1.]))
         ans.block_until_ready()
 
-  # TODO(skye): add parallel inf tests, ideally by factoring out test logic
+  def testDebugNansJitWithDonation(self):
+    # https://github.com/jax-ml/jax/issues/12514
+    a = jnp.array(0.)
+    with self.assertRaises(FloatingPointError):
+      ans = jax.jit(lambda x: 0. / x, donate_argnums=(0,))(a)
+      ans.block_until_ready()
 
+  def testDebugNansPmapWithDonation(self):
+    a = jnp.zeros((1,))
+    with self.assertRaises(FloatingPointError):
+      ans = jax.pmap(lambda x: 0. / x, donate_argnums=(0,))(a)
+      ans.block_until_ready()
+
+  @jtu.ignore_warning(message=".*is an experimental.*")
+  def testDebugNansPjitWithDonation(self):
+    if jax.device_count() < 2:
+      raise SkipTest("test requires >=2 devices")
+
+    p = jax.sharding.PartitionSpec('x')
+    f = pjit.pjit(lambda x: 0. / x,
+                  in_shardings=p,
+                  out_shardings=p,
+                  donate_argnums=(0,))
+
+    with jax.sharding.Mesh(np.array(jax.local_devices()[:2]), ('x',)):
+      with self.assertRaises(FloatingPointError):
+        ans = f(jnp.array([0., 1.]))
+        ans.block_until_ready()
+
+  def testDebugNansZeroDiv(self):
+    inp = jnp.zeros(())
+    def f(x, y):
+      return x / y
+
+    with self.assertRaisesRegex(
+        FloatingPointError,
+        r"invalid value \(nan\) encountered in div"):
+      f(inp, inp)
+
+    with self.assertRaisesRegex(
+        FloatingPointError,
+        r"invalid value \(nan\) encountered in div"):
+      jax.jit(f)(inp, inp)
+
+  def testDebugNansInput(self):
+
+    @jax.jit
+    def f(x):
+      return x * 3.
+
+    with self.assertRaisesRegex(FloatingPointError, "the de-optimized function did not .*input"):
+      f(np.nan)
+
+
+@jtu.with_config(jax_debug_infs=True)
 class DebugInfsTest(jtu.JaxTestCase):
-
-  def setUp(self):
-    self.cfg = config._read("jax_debug_infs")
-    config.update("jax_debug_infs", True)
-
-  def tearDown(self):
-    config.update("jax_debug_infs", self.cfg)
 
   def testSingleResultPrimitiveNoInf(self):
     A = jnp.array([[1., 2.], [2., 3.]])
@@ -191,34 +255,44 @@ class DebugInfsTest(jtu.JaxTestCase):
       ans = 1. / A
       ans.block_until_ready()
 
-  def testCallDeoptimized(self):
-    for jit in [api._python_jit, api._cpp_jit]:
+  @jtu.sample_product(jit=jtu.JIT_IMPLEMENTATION)
+  def testCallDeoptimized(self, jit):
+    @jit
+    def f(x):
+      return jax.lax.cond(
+          x == 1, lambda _: np.inf, lambda _: 2., operand=None)
 
-      @jit
-      def f(x):
-        return jax.lax.cond(
-            x == 1, lambda _: np.inf, lambda _: 2., operand=None)
-
-      # This makes sure, when using the C++ jit, that the Python code has been
-      # run to compile, and the next call won't go through `cache_miss`.
-      f(2)
-      # 'cond' not 'xla_call'
-      msg = r"invalid value \(inf\) encountered in cond"
-      with self.assertRaisesRegex(FloatingPointError, msg):
-        f(1)
+    # This makes sure, when using the C++ jit, that the Python code has been
+    # run to compile, and the next call won't go through `cache_miss`.
+    f(2)
+    # 'cond' not 'xla_call'
+    msg = r"invalid value \(inf\) encountered in .*cond.*"
+    with self.assertRaisesRegex(FloatingPointError, msg):
+      f(1)
 
   def testDebugNansDoesntCorruptCaches(self):
-    # https://github.com/google/jax/issues/6614
+    # https://github.com/jax-ml/jax/issues/6614
     @jax.jit
     def f(x):
       return jnp.divide(x, x)
 
     for _ in range(2):
       try:
-       with jax.debug_nans(True):
-         jax.grad(f)(0.)
+        with jax.debug_nans(True):
+          jax.grad(f)(0.)
       except FloatingPointError:
         pass
+
+  def testDebugNansDoesntReturnDeoptimizedResult(self):
+    @jax.jit
+    def f(x):
+      y = x + 2  # avoid trivial dispatch path by adding some eqn
+      return jnp.nan, y
+
+    with self.assertRaisesRegex(FloatingPointError, "the de-optimized function did not .*literal"):
+      with jax.debug_nans(True):
+        f(3)
+
 
 if __name__ == '__main__':
   absltest.main(testLoader=jtu.JaxTestLoader())

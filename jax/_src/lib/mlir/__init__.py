@@ -1,4 +1,4 @@
-# Copyright 2021 Google LLC
+# Copyright 2021 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,5 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# flake8: noqa: F401
+# ruff: noqa: F401
+
 import jaxlib.mlir.ir as ir
+import jaxlib.mlir.passmanager as passmanager
+from jaxlib.mlir._mlir_libs import register_jax_dialects

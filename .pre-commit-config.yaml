@@ -8,20 +8,40 @@
 # 'pre-commit run --all'
 
 repos:
-- repo: https://gitlab.com/pycqa/flake8
-  rev: '4.0.1'
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: 2c9f875913ee60ca25ce70243dc24d5b6415598c  # frozen: v4.6.0
   hooks:
-  - id: flake8
+  - id: check-ast
+  - id: check-merge-conflict
+  - id: check-toml
+  - id: check-yaml
+  - id: end-of-file-fixer
+    # only include python files
+    files: \.py$
+  - id: debug-statements
+    # only include python files
+    files: \.py$
+  - id: trailing-whitespace
+    # only include python files
+    files: \.py$
+
+- repo: https://github.com/astral-sh/ruff-pre-commit
+  rev: 8983acb92ee4b01924893632cf90af926fa608f0  # frozen: v0.7.0
+  hooks:
+  - id: ruff
 
 - repo: https://github.com/pre-commit/mirrors-mypy
-  rev: 'v0.931'
+  rev: 'bbc3dc1f890007061f18f17e2334f216ea9e5df7'  # frozen: v1.14.1
   hooks:
   - id: mypy
-    files: jax/
-    additional_dependencies: [types-requests==0.1.11, jaxlib==0.1.74]
+    files: (jax/|tests/typing_test\.py)
+    exclude: jax/_src/basearray.py|jax/numpy/__init__.py  # Use pyi instead
+    additional_dependencies: [types-requests==2.31.0, jaxlib, numpy>=2.2.0]
+    args: [--config=pyproject.toml]
 
 - repo: https://github.com/mwouts/jupytext
-  rev: v1.13.6
+  rev: 8ed836db64ad5d304f2315e6bfd9049c9142e190  # frozen: v1.16.4
   hooks:
   - id: jupytext
+    files: docs/
     args: [--sync]

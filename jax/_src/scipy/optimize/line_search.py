@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2020 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,9 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import NamedTuple, Union
+from __future__ import annotations
+
+from typing import NamedTuple
 from functools import partial
 
+from jax._src.numpy.util import promote_dtypes_inexact
 import jax.numpy as jnp
 import jax
 from jax import lax
@@ -23,13 +26,15 @@ _dot = partial(jnp.dot, precision=lax.Precision.HIGHEST)
 
 
 def _cubicmin(a, fa, fpa, b, fb, c, fc):
+  dtype = jnp.result_type(a, fa, fpa, b, fb, c, fc)
   C = fpa
   db = b - a
   dc = c - a
   denom = (db * dc) ** 2 * (db - dc)
   d1 = jnp.array([[dc ** 2, -db ** 2],
-                  [-dc ** 3, db ** 3]])
-  A, B = _dot(d1, jnp.array([fb - fa - C * db, fc - fa - C * dc])) / denom
+                  [-dc ** 3, db ** 3]], dtype=dtype)
+  d2 = jnp.array([fb - fa - C * db, fc - fa - C * dc], dtype=dtype)
+  A, B = _dot(d1, d2) / denom
 
   radical = B * B - 3. * A * C
   xmin = a + (-B + jnp.sqrt(radical)) / (3. * A)
@@ -49,30 +54,28 @@ def _quadmin(a, fa, fpa, b, fb):
 def _binary_replace(replace_bit, original_dict, new_dict, keys=None):
   if keys is None:
     keys = new_dict.keys()
-  out = dict()
-  for key in keys:
-    out[key] = jnp.where(replace_bit, new_dict[key], original_dict[key])
-  return out
+  return {key: jnp.where(replace_bit, new_dict[key], original_dict[key])
+          for key in keys}
 
 
 class _ZoomState(NamedTuple):
-  done: Union[bool, jnp.ndarray]
-  failed: Union[bool, jnp.ndarray]
-  j: Union[int, jnp.ndarray]
-  a_lo: Union[float, jnp.ndarray]
-  phi_lo: Union[float, jnp.ndarray]
-  dphi_lo: Union[float, jnp.ndarray]
-  a_hi: Union[float, jnp.ndarray]
-  phi_hi: Union[float, jnp.ndarray]
-  dphi_hi: Union[float, jnp.ndarray]
-  a_rec: Union[float, jnp.ndarray]
-  phi_rec: Union[float, jnp.ndarray]
-  a_star: Union[float, jnp.ndarray]
-  phi_star: Union[float, jnp.ndarray]
-  dphi_star: Union[float, jnp.ndarray]
-  g_star: Union[float, jnp.ndarray]
-  nfev: Union[int, jnp.ndarray]
-  ngev: Union[int, jnp.ndarray]
+  done: bool | jax.Array
+  failed: bool | jax.Array
+  j: int | jax.Array
+  a_lo: float | jax.Array
+  phi_lo: float | jax.Array
+  dphi_lo: float | jax.Array
+  a_hi: float | jax.Array
+  phi_hi: float | jax.Array
+  dphi_hi: float | jax.Array
+  a_rec: float | jax.Array
+  phi_rec: float | jax.Array
+  a_star: float | jax.Array
+  phi_star: float | jax.Array
+  dphi_star: float | jax.Array
+  g_star: float | jax.Array
+  nfev: int | jax.Array
+  ngev: int | jax.Array
 
 
 def _zoom(restricted_func_and_grad, wolfe_one, wolfe_two, a_lo, phi_lo,
@@ -115,7 +118,7 @@ def _zoom(restricted_func_and_grad, wolfe_one, wolfe_two, a_lo, phi_lo,
 
     # This will cause the line search to stop, and since the Wolfe conditions
     # are not satisfied the minimization should stop too.
-    threshold = jnp.where((jnp.finfo(dalpha).bits < 64), 1e-5, 1e-10)
+    threshold = jnp.where((jnp.finfo(dalpha.dtype).bits < 64), 1e-5, 1e-10)
     state = state._replace(failed=state.failed | (dalpha <= threshold))
 
     # Cubmin is sometimes nan, though in this case the bounds check will fail.
@@ -201,7 +204,7 @@ def _zoom(restricted_func_and_grad, wolfe_one, wolfe_two, a_lo, phi_lo,
     state = state._replace(j=state.j + 1)
     # Choose higher cutoff for maxiter than Scipy as Jax takes longer to find
     # the same value - possibly floating point issues?
-    state = state._replace(failed= state.failed | state.j >= 30)
+    state = state._replace(failed= state.failed | (state.j >= 30))
     return state
 
   state = lax.while_loop(lambda state: (~state.done) & (~pass_through) & (~state.failed),
@@ -212,18 +215,18 @@ def _zoom(restricted_func_and_grad, wolfe_one, wolfe_two, a_lo, phi_lo,
 
 
 class _LineSearchState(NamedTuple):
-  done: Union[bool, jnp.ndarray]
-  failed: Union[bool, jnp.ndarray]
-  i: Union[int, jnp.ndarray]
-  a_i1: Union[float, jnp.ndarray]
-  phi_i1: Union[float, jnp.ndarray]
-  dphi_i1: Union[float, jnp.ndarray]
-  nfev: Union[int, jnp.ndarray]
-  ngev: Union[int, jnp.ndarray]
-  a_star: Union[float, jnp.ndarray]
-  phi_star: Union[float, jnp.ndarray]
-  dphi_star: Union[float, jnp.ndarray]
-  g_star: jnp.ndarray
+  done: bool | jax.Array
+  failed: bool | jax.Array
+  i: int | jax.Array
+  a_i1: float | jax.Array
+  phi_i1: float | jax.Array
+  dphi_i1: float | jax.Array
+  nfev: int | jax.Array
+  ngev: int | jax.Array
+  a_star: float | jax.Array
+  phi_star: float | jax.Array
+  dphi_star: float | jax.Array
+  g_star: jax.Array
 
 
 class _LineSearchResults(NamedTuple):
@@ -240,15 +243,15 @@ class _LineSearchResults(NamedTuple):
     g_k: final gradient value
     status: integer end status
   """
-  failed: Union[bool, jnp.ndarray]
-  nit: Union[int, jnp.ndarray]
-  nfev: Union[int, jnp.ndarray]
-  ngev: Union[int, jnp.ndarray]
-  k: Union[int, jnp.ndarray]
-  a_k: Union[int, jnp.ndarray]
-  f_k: jnp.ndarray
-  g_k: jnp.ndarray
-  status: Union[bool, jnp.ndarray]
+  failed: bool | jax.Array
+  nit: int | jax.Array
+  nfev: int | jax.Array
+  ngev: int | jax.Array
+  k: int | jax.Array
+  a_k: int | jax.Array
+  f_k: jax.Array
+  g_k: jax.Array
+  status: bool | jax.Array
 
 
 def line_search(f, xk, pk, old_fval=None, old_old_fval=None, gfk=None, c1=1e-4,
@@ -269,13 +272,15 @@ def line_search(f, xk, pk, old_fval=None, old_old_fval=None, gfk=None, c1=1e-4,
 
   Returns: LineSearchResults
   """
+  xk, pk = promote_dtypes_inexact(xk, pk)
   def restricted_func_and_grad(t):
+    t = jnp.array(t, dtype=pk.dtype)
     phi, g = jax.value_and_grad(f)(xk + t * pk)
     dphi = jnp.real(_dot(g, pk))
     return phi, dphi, g
 
   if old_fval is None or gfk is None:
-    phi_0, dphi_0, gfk = restricted_func_and_grad(0.)
+    phi_0, dphi_0, gfk = restricted_func_and_grad(0)
   else:
     phi_0 = old_fval
     dphi_0 = jnp.real(_dot(gfk, pk))
@@ -403,8 +408,8 @@ def line_search(f, xk, pk, old_fval=None, old_old_fval=None, gfk=None, c1=1e-4,
   )
   # Step sizes which are too small causes the optimizer to get stuck with a
   # direction of zero in <64 bit mode - avoid with a floor on minimum step size.
-  alpha_k = state.a_star
-  alpha_k = jnp.where((jnp.finfo(alpha_k).bits != 64)
+  alpha_k = jnp.asarray(state.a_star)
+  alpha_k = jnp.where((jnp.finfo(alpha_k.dtype).bits != 64)
                     & (jnp.abs(alpha_k) < 1e-8),
                       jnp.sign(alpha_k) * 1e-8,
                       alpha_k)

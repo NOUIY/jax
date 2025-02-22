@@ -5,7 +5,7 @@ jupytext:
     extension: .md
     format_name: myst
     format_version: 0.13
-    jupytext_version: 1.13.6
+    jupytext_version: 1.16.4
 kernelspec:
   display_name: Python 3
   language: python
@@ -16,9 +16,9 @@ kernelspec:
 
 # The Autodiff Cookbook
 
-[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/google/jax/blob/main/docs/notebooks/autodiff_cookbook.ipynb)
+<!--* freshness: { reviewed: '2024-04-08' } *-->
 
-*alexbw@, mattjj@*  
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/jax-ml/jax/blob/main/docs/notebooks/autodiff_cookbook.ipynb) [![Open in Kaggle](https://kaggle.com/static/images/open-in-kaggle.svg)](https://kaggle.com/kernels/welcome?src=https://github.com/jax-ml/jax/blob/main/docs/notebooks/autodiff_cookbook.ipynb)
 
 JAX has a pretty general automatic differentiation system. In this notebook, we'll go through a whole bunch of neat autodiff ideas that you can cherry pick for your own work, starting with the basics.
 
@@ -29,7 +29,7 @@ import jax.numpy as jnp
 from jax import grad, jit, vmap
 from jax import random
 
-key = random.PRNGKey(0)
+key = random.key(0)
 ```
 
 +++ {"id": "YxnjtAGN6vu2"}
@@ -125,7 +125,7 @@ print('b_grad', b_grad)
 
 +++ {"id": "MDl5UZl4oyzB"}
 
-This `grad` API has a direct correspondence to the excellent notation in Spivak's classic *Calculus on Manifolds* (1965), also used in Sussman and Wisdom's [*Structure and Interpretation of Classical Mechanics*](http://mitpress.mit.edu/sites/default/files/titles/content/sicm_edition_2/book.html) (2015) and their [*Functional Differential Geometry*](https://mitpress.mit.edu/books/functional-differential-geometry) (2013). Both books are open-access. See in particular the "Prologue" section of *Functional Differential Geometry* for a defense of this notation.
+This `grad` API has a direct correspondence to the excellent notation in Spivak's classic *Calculus on Manifolds* (1965), also used in Sussman and Wisdom's [*Structure and Interpretation of Classical Mechanics*](https://mitpress.mit.edu/9780262028967/structure-and-interpretation-of-classical-mechanics) (2015) and their [*Functional Differential Geometry*](https://mitpress.mit.edu/9780262019347/functional-differential-geometry) (2013). Both books are open-access. See in particular the "Prologue" section of *Functional Differential Geometry* for a defense of this notation.
 
 Essentially, when using the `argnums` argument, if `f` is a Python function for evaluating the mathematical function $f$, then the Python expression `grad(f, i)` evaluates to a Python function for evaluating $\partial_i f$.
 
@@ -151,7 +151,7 @@ print(grad(loss2)({'W': W, 'b': b}))
 
 +++ {"id": "cJ2NxiN58bfI"}
 
-You can [register your own container types](https://github.com/google/jax/issues/446#issuecomment-467105048) to work with not just `grad` but all the JAX transformations (`jit`, `vmap`, etc.).
+You can [register your own container types](https://github.com/jax-ml/jax/issues/446#issuecomment-467105048) to work with not just `grad` but all the JAX transformations (`jit`, `vmap`, etc.).
 
 +++ {"id": "PaCHzAtGruBz"}
 
@@ -274,7 +274,7 @@ print(J)
 
 +++ {"id": "iZDL-n_AvgBt"}
 
-These two functions compute the same values (up to machine numerics), but differ in their implementation: `jacfwd` uses forward-mode automatic differentiation, which is more efficient for "tall" Jacobian matrices, while `jacrev` uses reverse-mode, which is more efficient for "wide" Jacobian matrices. For matrices that are near-square, `jacfwd` probably has an edge over `jacrev`.
+These two functions compute the same values (up to machine numerics), but differ in their implementation: `jacfwd` uses forward-mode automatic differentiation, which is more efficient for "tall" Jacobian matrices (more outputs than inputs), while `jacrev` uses reverse-mode, which is more efficient for "wide" Jacobian matrices (more inputs than outputs). For matrices that are near-square, `jacfwd` probably has an edge over `jacrev`.
 
 +++ {"id": "zeKlr7Xz8bfm"}
 
@@ -378,7 +378,8 @@ y, u = jvp(f, (W,), (v,))
 
 +++ {"id": "m1VJgJYQGfCK"}
 
-In terms of Haskell-like type signatures, we could write
+In terms of [Haskell-like type signatures](https://wiki.haskell.org/Type_signature),
+we could write
 
 ```haskell
 jvp :: (a -> b) -> a -> T a -> (b, T b)
@@ -451,7 +452,8 @@ v = vjp_fun(u)
 
 +++ {"id": "oVOZexCEkvv3"}
 
-In terms of Haskell-like type signatures, we could write
+In terms of [Haskell-like type signatures](https://wiki.haskell.org/Type_signature),
+we could write
 
 ```haskell
 vjp :: (a -> b) -> a -> (b, CT b -> CT a)
@@ -590,7 +592,7 @@ print("Naive full Hessian materialization")
 
 ### Jacobian-Matrix and Matrix-Jacobian products
 
-Now that we have `jvp` and `vjp` transformations that give us functions to push-forward or pull-back single vectors at a time, we can use JAX's `vmap` [transformation](https://github.com/google/jax#auto-vectorization-with-vmap) to push and pull entire bases at once. In particular, we can use that to write fast matrix-Jacobian and Jacobian-matrix products.
+Now that we have `jvp` and `vjp` transformations that give us functions to push-forward or pull-back single vectors at a time, we can use JAX's `vmap` [transformation](https://github.com/jax-ml/jax#auto-vectorization-with-vmap) to push and pull entire bases at once. In particular, we can use that to write fast matrix-Jacobian and Jacobian-matrix products.
 
 ```{code-cell} ipython3
 :id: asAWvxVaCmsx
@@ -612,7 +614,7 @@ def vmap_mjp(f, x, M):
     outs, = vmap(vjp_fun)(M)
     return outs
 
-key = random.PRNGKey(0)
+key = random.key(0)
 num_covecs = 128
 U = random.normal(key, (num_covecs,) + y.shape)
 
@@ -671,7 +673,7 @@ def our_jacrev(f):
         y, vjp_fun = vjp(f, x)
         # Use vmap to do a matrix-Jacobian product.
         # Here, the matrix is the Euclidean basis, so we get all
-        # entries in the Jacobian at once. 
+        # entries in the Jacobian at once.
         J, = vmap(vjp_fun, in_axes=0)(jnp.eye(len(y)))
         return J
     return jacfun
@@ -687,7 +689,7 @@ from jax import jacfwd as builtin_jacfwd
 def our_jacfwd(f):
     def jacfun(x):
         _jvp = lambda s: jvp(f, (x,), (s,))[1]
-        Jt =vmap(_jvp, in_axes=1)(jnp.eye(len(x)))
+        Jt = vmap(_jvp, in_axes=1)(jnp.eye(len(x)))
         return jnp.transpose(Jt)
     return jacfun
 
@@ -768,7 +770,7 @@ Here's a check:
 :id: BGZV__zupIMS
 
 def check(seed):
-  key = random.PRNGKey(seed)
+  key = random.key(seed)
 
   # random coeffs for u and v
   key, subkey = random.split(key)
@@ -831,7 +833,7 @@ Here's a check of the VJP rules:
 :id: 4J7edvIBttcU
 
 def check(seed):
-  key = random.PRNGKey(seed)
+  key = random.key(seed)
 
   # random coeffs for u and v
   key, subkey = random.split(key)

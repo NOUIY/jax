@@ -1,4 +1,4 @@
-# Copyright 2018 Google LLC
+# Copyright 2018 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -26,21 +26,30 @@
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 #
+import inspect
+import operator
 import os
 import sys
 
 sys.path.insert(0, os.path.abspath('..'))
 
-
-# Currently type aliases are expanded. We tried a workaround along the lines of:
+# Workaround to avoid expanding type aliases. See:
 # https://github.com/sphinx-doc/sphinx/issues/6518#issuecomment-589613836
-# Unfortunately, this workaround makes Sphinx drop module-level documentation.
-# See https://github.com/google/jax/issues/3452.
+from typing import ForwardRef
+
+def _do_not_evaluate_in_jax(
+    self, globalns, *args, _evaluate=ForwardRef._evaluate,
+):
+  if globalns.get('__name__', '').startswith('jax'):
+    return self
+  return _evaluate(self, globalns, *args)
+
+ForwardRef._evaluate = _do_not_evaluate_in_jax
 
 # -- Project information -----------------------------------------------------
 
 project = 'JAX'
-copyright = '2020, Google LLC. NumPy and SciPy documentation are copyright the respective authors.'
+copyright = '2024, The JAX Authors'
 author = 'The JAX authors'
 
 # The short X.Y version
@@ -63,25 +72,31 @@ extensions = [
     'sphinx.ext.autodoc',
     'sphinx.ext.autosummary',
     'sphinx.ext.intersphinx',
+    'sphinx.ext.linkcode',
     'sphinx.ext.mathjax',
     'sphinx.ext.napoleon',
-    'sphinx.ext.viewcode',
     'matplotlib.sphinxext.plot_directive',
-    'sphinx_autodoc_typehints',
     'myst_nb',
     "sphinx_remove_toctrees",
+    'sphinx_copybutton',
     'jax_extensions',
+    'sphinx_design',
+    'sphinxext.rediraffe',
 ]
 
 intersphinx_mapping = {
+    'array_api': ('https://data-apis.org/array-api/2023.12/', None),
     'python': ('https://docs.python.org/3/', None),
     'numpy': ('https://numpy.org/doc/stable/', None),
-    'scipy': ('https://docs.scipy.org/doc/scipy-1.8.0/html-scipyorg/', None),
+    'scipy': ('https://docs.scipy.org/doc/scipy/reference/', None),
 }
 
 suppress_warnings = [
     'ref.citation',  # Many duplicated citations in numpy/scipy docstrings.
     'ref.footnote',  # Many unreferenced footnotes in numpy/scipy docstrings
+    'myst.header',
+    # TODO(jakevdp): remove this suppression once issue is fixed.
+    'misc.highlighting_failure', # https://github.com/ipython/ipython/issues/14142
 ]
 
 # Add any paths that contain templates here, relative to this directory.
@@ -102,7 +117,7 @@ main_doc = 'index'
 #
 # This is also used if you do content translation via gettext catalogs.
 # Usually you set "language" from the command line for these cases.
-language = None
+language = 'en'
 
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
@@ -116,19 +131,16 @@ exclude_patterns = [
     # Ignore markdown source for notebooks; myst-nb builds from the ipynb
     # These are kept in sync using the jupytext pre-commit hook.
     'notebooks/*.md',
-    'design_notes/type_promotion.md',
-    # TODO: revert to jax-101/*.md once 08-pjit has a notebook
-    'jax-101/01-jax-basics.md',
-    'jax-101/02-jitting.md',
-    'jax-101/03-vectorization.md',
-    'jax-101/04-advanced-autodiff.md',
-    'jax-101/05-random-numbers.md',
-    'jax-101/05.1-pytrees.md',
-    'jax-101/06-parallelism.md',
-    'jax-101/07-state.md',
+    'pallas/quickstart.md',
+    'pallas/tpu/pipelining.md',
+    'pallas/tpu/distributed.md',
+    'pallas/tpu/sparse.md',
+    'pallas/tpu/matmul.md',
+    'jep/9407-type-promotion.md',
     'autodidax.md',
-    # Attempt to fix RTD build failure
-    'transformations.md',
+    'autodidax2_part1.md',
+    'sharded-computation.md',
+    'ffi.ipynb',
 ]
 
 # The name of the Pygments (syntax highlighting) style to use.
@@ -156,8 +168,10 @@ html_theme = 'sphinx_book_theme'
 # further.  For a list of options available for each theme, see the
 # documentation.
 html_theme_options = {
-    'logo_only': True,
     'show_toc_level': 2,
+    'repository_url': 'https://github.com/jax-ml/jax',
+    'use_repository_button': True,     # add a "link to repository" button
+    'navigation_with_keys': False,
 }
 
 # The name of an image file (relative to this directory) to place at the top
@@ -171,6 +185,10 @@ html_favicon = '_static/favicon.png'
 # so a file named "default.css" will overwrite the builtin "default.css".
 html_static_path = ['_static']
 
+html_css_files = [
+    'style.css',
+]
+
 # Custom sidebar templates, must be a dictionary that maps document names
 # to template names.
 #
@@ -182,26 +200,38 @@ html_static_path = ['_static']
 # html_sidebars = {}
 
 # -- Options for myst ----------------------------------------------
-jupyter_execute_notebooks = "force"
-execution_allow_errors = False
-execution_fail_on_error = True  # Requires https://github.com/executablebooks/MyST-NB/pull/296
+myst_heading_anchors = 3  # auto-generate 3 levels of heading anchors
+myst_enable_extensions = ['dollarmath']
+nb_execution_mode = "force"
+nb_execution_allow_errors = False
+nb_merge_streams = True
+nb_execution_show_tb = True
 
 # Notebook cell execution timeout; defaults to 30.
-execution_timeout = 100
+nb_execution_timeout = 100
 
 # List of patterns, relative to source directory, that match notebook
 # files that will not be executed.
-execution_excludepatterns = [
+nb_execution_excludepatterns = [
     # Slow notebook: long time to load tf.ds
     'notebooks/neural_network_with_tfds_data.*',
     # Slow notebook
     'notebooks/Neural_Network_and_Data_Loading.*',
-    # Strange error apparently due to asynchronous cell execution
-    'notebooks/thinking_in_jax.*',
-    # TODO(jakevdp): enable execution on these
-    'design_notes/type_promotion.*',
-    'jax-101/*',
-    'notebooks/xmap_tutorial.*',
+    # Has extra requirements: networkx, pandas, pytorch, tensorflow, etc.
+    'jep/9407-type-promotion.*',
+    # TODO(jakevdp): enable execution on the following if possible:
+    'notebooks/Distributed_arrays_and_automatic_parallelization.*',
+    'notebooks/autodiff_remat.*',
+    # Fails on readthedocs with Kernel Died
+    'notebooks/convolutions.ipynb',
+    # Requires accelerators
+    'pallas/quickstart.*',
+    'pallas/tpu/pipelining.*',
+    'pallas/tpu/distributed.*',
+    'pallas/tpu/sparse.*',
+    'pallas/tpu/matmul.*',
+    'sharded-computation.*',
+    'distributed_data_loading.*'
 ]
 
 # -- Options for HTMLHelp output ---------------------------------------------
@@ -280,11 +310,65 @@ epub_exclude_files = ['search.html']
 
 
 # -- Extension configuration -------------------------------------------------
+# Define prompt text pattern to be removed for copybutton
+# See  https://sphinx-copybutton.readthedocs.io/en/latest/use.html#using-regexp-prompt-identifiers
+copybutton_prompt_text = r">>> |\.\.\. |\$ |In \[\d*\]: | {2,5}\.\.\.: | {5,8}: "
+copybutton_prompt_is_regexp = True
 
-# Tell sphinx-autodoc-typehints to generate stub parameter annotations including
-# types, even if the parameters aren't explicitly documented.
-always_document_param_types = True
-
+# Tell sphinx autodoc how to render type aliases.
+autodoc_typehints = "description"
+autodoc_typehints_description_target = "all"
+autodoc_type_aliases = {
+    'ArrayLike': 'jax.typing.ArrayLike',
+    'DTypeLike': 'jax.typing.DTypeLike',
+}
 
 # Remove auto-generated API docs from sidebars. They take too long to build.
 remove_from_toctrees = ["_autosummary/*"]
+
+# Customize code links via sphinx.ext.linkcode
+
+def linkcode_resolve(domain, info):
+  import jax
+
+  if domain != 'py':
+    return None
+  if not info['module']:
+    return None
+  if not info['fullname']:
+    return None
+  if info['module'].split(".")[0] != 'jax':
+     return None
+  try:
+    mod = sys.modules.get(info['module'])
+    obj = operator.attrgetter(info['fullname'])(mod)
+    if isinstance(obj, property):
+        obj = obj.fget
+    while hasattr(obj, '__wrapped__'):  # decorated functions
+        obj = obj.__wrapped__
+    filename = inspect.getsourcefile(obj)
+    source, linenum = inspect.getsourcelines(obj)
+  except:
+    return None
+  filename = os.path.relpath(filename, start=os.path.dirname(jax.__file__))
+  lines = f"#L{linenum}-L{linenum + len(source)}" if linenum else ""
+  return f"https://github.com/jax-ml/jax/blob/main/jax/{filename}{lines}"
+
+# Generate redirects from deleted files to new sources
+rediraffe_redirects = {
+    'notebooks/quickstart.md': 'quickstart.md',
+    'jax-101/01-jax-basics.md': 'key-concepts.md',
+    'jax-101/02-jitting.md': 'jit-compilation.md',
+    'jax-101/03-vectorization.md': 'automatic-vectorization.md',
+    'jax-101/04-advanced-autodiff.md': 'automatic-differentiation.md',
+    'jax-101/05-random-numbers.md': 'random-numbers.md',
+    'jax-101/05.1-pytrees.md': 'working-with-pytrees.md',
+    'jax-101/06-parallelism.md': 'sharded-computation.md',
+    'jax-101/07-state.md': 'stateful-computations.md',
+    'jax-101/08-pjit.rst': 'sharded-computation.md',
+    'jax-101/index.rst': 'tutorials.rst',
+    'notebooks/external_callbacks.md': 'external-callbacks.md',
+    'notebooks/How_JAX_primitives_work.md': 'jax-primitives.md',
+    'jax.extend.ffi.rst': 'jax.ffi.rst',
+    'Custom_Operation_for_GPUs.md': 'ffi.md',
+}

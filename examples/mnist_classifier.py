@@ -1,4 +1,4 @@
-# Copyright 2018 Google LLC
+# Copyright 2018 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -50,7 +50,7 @@ init_random_params, predict = stax.serial(
     Dense(10), LogSoftmax)
 
 if __name__ == "__main__":
-  rng = random.PRNGKey(0)
+  rng = random.key(0)
 
   step_size = 0.001
   num_epochs = 10
@@ -92,6 +92,6 @@ if __name__ == "__main__":
     params = get_params(opt_state)
     train_acc = accuracy(params, (train_images, train_labels))
     test_acc = accuracy(params, (test_images, test_labels))
-    print("Epoch {} in {:0.2f} sec".format(epoch, epoch_time))
-    print("Training set accuracy {}".format(train_acc))
-    print("Test set accuracy {}".format(test_acc))
+    print(f"Epoch {epoch} in {epoch_time:0.2f} sec")
+    print(f"Training set accuracy {train_acc}")
+    print(f"Test set accuracy {test_acc}")

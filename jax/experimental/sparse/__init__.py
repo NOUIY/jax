@@ -1,4 +1,4 @@
-# Copyright 2021 Google LLC
+# Copyright 2021 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -24,7 +24,8 @@ Batched-coordinate (BCOO) sparse matrices
 -----------------------------------------
 The main high-level sparse object currently available in JAX is the :class:`BCOO`,
 or *batched coordinate* sparse array, which offers a compressed storage format compatible
-with JAX functions.
+with JAX transformations, in particular JIT (e.g. :func:`jax.jit`), batching
+(e.g. :func:`jax.vmap`) and autodiff (e.g. :func:`jax.grad`).
 
 Here is an example of creating a sparse array from a dense array:
 
@@ -44,21 +45,21 @@ Here is an example of creating a sparse array from a dense array:
 Convert back to a dense array with the ``todense()`` method:
 
     >>> M_sp.todense()
-    DeviceArray([[0., 1., 0., 2.],
-                 [3., 0., 0., 0.],
-                 [0., 0., 4., 0.]], dtype=float32)
+    Array([[0., 1., 0., 2.],
+           [3., 0., 0., 0.],
+           [0., 0., 4., 0.]], dtype=float32)
 
 The BCOO format is a somewhat modified version of the standard COO format, and the dense
 representation can be seen in the ``data`` and ``indices`` attributes:
 
     >>> M_sp.data  # Explicitly stored data
-    DeviceArray([1., 2., 3., 4.], dtype=float32)
+    Array([1., 2., 3., 4.], dtype=float32)
 
     >>> M_sp.indices # Indices of the stored data
-    DeviceArray([[0, 1],
-                 [0, 3],
-                 [1, 0],
-                 [2, 2]], dtype=int32)
+    Array([[0, 1],
+           [0, 3],
+           [1, 0],
+           [2, 2]], dtype=int32)
 
 BCOO objects have familiar array-like attributes, as well as sparse-specific attributes:
 
@@ -81,10 +82,10 @@ product:
     >>> y = jnp.array([3., 6., 5.])
 
     >>> M_sp.T @ y
-    DeviceArray([18.,  3., 20.,  6.], dtype=float32)
+    Array([18.,  3., 20.,  6.], dtype=float32)
 
     >>> M.T @ y  # Compare to dense version
-    DeviceArray([18.,  3., 20.,  6.], dtype=float32)
+    Array([18.,  3., 20.,  6.], dtype=float32)
 
 BCOO objects are designed to be compatible with JAX transforms, including :func:`jax.jit`,
 :func:`jax.vmap`, :func:`jax.grad`, and others. For example:
@@ -95,7 +96,7 @@ BCOO objects are designed to be compatible with JAX transforms, including :func:
     ...   return (M_sp.T @ y).sum()
     ...
     >>> jit(grad(f))(y)
-    DeviceArray([3., 3., 4.], dtype=float32)
+    Array([3., 3., 4.], dtype=float32)
 
 Note, however, that under normal circumstances :mod:`jax.numpy` and :mod:`jax.lax` functions
 do not know how to handle sparse matrices, so attempting to compute things like
@@ -113,7 +114,7 @@ Consider this function, which computes a more complicated result from a matrix a
     ...   return 2 * jnp.dot(jnp.log1p(M.T), v) + 1
     ...
     >>> f(M, y)
-    DeviceArray([17.635532,  5.158883, 17.09438 ,  7.591674], dtype=float32)
+    Array([17.635532,  5.158883, 17.09438 ,  7.591674], dtype=float32)
 
 Were we to pass a sparse matrix to this directly, it would result in an error, because ``jnp``
 functions do not recognize sparse inputs. However, with :func:`sparsify`, we get a version of
@@ -122,19 +123,24 @@ this function that does accept sparse matrices:
     >>> f_sp = sparse.sparsify(f)
 
     >>> f_sp(M_sp, y)
-    DeviceArray([17.635532,  5.158883, 17.09438 ,  7.591674], dtype=float32)
+    Array([17.635532,  5.158883, 17.09438 ,  7.591674], dtype=float32)
 
-Currently support for :func:`sparsify` is limited to a couple dozen primitives, including:
+Support for :func:`sparsify` includes a large number of the most common primitives, including:
 
-- generalized matrix-matrix products (:obj:`~jax.lax.dot_general_p`)
-- generalized array transpose (:obj:`~jax.lax.transpose_p`)
-- zero-preserving elementwise binary operations (:obj:`~jax.lax.add_p`, :obj:`~jax.lax.mul_p`)
-- zero-preserving elementwise unary operations (:obj:`~jax.lax.abs_p`, :obj:`jax.lax.neg_p`, etc.)
-- summation reductions (:obj:`lax.reduce_sum_p`)
-- some higher-order functions (:obj:`lax.cond_p`, :obj:`lax.while_p`, :obj:`lax.scan_p`)
+- generalized (batched) matrix products & einstein summations (:obj:`~jax.lax.dot_general_p`)
+- zero-preserving elementwise binary operations (e.g. :obj:`~jax.lax.add_p`, :obj:`~jax.lax.mul_p`, etc.)
+- zero-preserving elementwise unary operations (e.g. :obj:`~jax.lax.abs_p`, :obj:`jax.lax.neg_p`, etc.)
+- summation reductions (:obj:`~jax.lax.reduce_sum_p`)
+- general indexing operations (:obj:`~jax.lax.slice_p`, `lax.dynamic_slice_p`, `lax.gather_p`)
+- concatenation and stacking (:obj:`~jax.lax.concatenate_p`)
+- transposition & reshaping ((:obj:`~jax.lax.transpose_p`, :obj:`~jax.lax.reshape_p`,
+  :obj:`~jax.lax.squeeze_p`, :obj:`~jax.lax.broadcast_in_dim_p`)
+- some higher-order functions (:obj:`~jax.lax.cond_p`, :obj:`~jax.lax.while_p`, :obj:`~jax.lax.scan_p`)
+- some simple 1D convolutions (:obj:`~jax.lax.conv_general_dilated_p`)
 
-This initial support is enough to enable some surprisingly sophisticated workflows, as the
-next section will show.
+Nearly any :mod:`jax.numpy` function that lowers to these supported primitives can be used
+within a sparsify transform to operate on sparse arrays. This set of primitives is enough
+to enable relatively sophisticated sparse workflows, as the next section will show.
 
 Example: sparse logistic regression
 -----------------------------------
@@ -182,25 +188,43 @@ To fit the same model on sparse data, we can apply the :func:`sparsify` transfor
      -0.670236    0.03132951 -0.05356663]
 """
 
-# flake8: noqa: F401
+# Note: import <name> as <name> is required for names to be exported.
+# See PEP 484 & https://github.com/jax-ml/jax/issues/7570
+
 from jax.experimental.sparse.ad import (
+    jacfwd as jacfwd,
+    jacobian as jacobian,
+    jacrev as jacrev,
     grad as grad,
     value_and_grad as value_and_grad,
 )
 from jax.experimental.sparse.bcoo import (
     bcoo_broadcast_in_dim as bcoo_broadcast_in_dim,
+    bcoo_concatenate as bcoo_concatenate,
+    bcoo_conv_general_dilated as bcoo_conv_general_dilated,
     bcoo_dot_general as bcoo_dot_general,
     bcoo_dot_general_p as bcoo_dot_general_p,
     bcoo_dot_general_sampled as bcoo_dot_general_sampled,
     bcoo_dot_general_sampled_p as bcoo_dot_general_sampled_p,
+    bcoo_dynamic_slice as bcoo_dynamic_slice,
     bcoo_extract as bcoo_extract,
     bcoo_extract_p as bcoo_extract_p,
     bcoo_fromdense as bcoo_fromdense,
     bcoo_fromdense_p as bcoo_fromdense_p,
+    bcoo_gather as bcoo_gather,
+    bcoo_multiply_dense as bcoo_multiply_dense,
+    bcoo_multiply_sparse as bcoo_multiply_sparse,
+    bcoo_update_layout as bcoo_update_layout,
     bcoo_reduce_sum as bcoo_reduce_sum,
-    bcoo_rdot_general as bcoo_rdot_general,
-    bcoo_spdot_general as bcoo_spdot_general,
+    bcoo_reshape as bcoo_reshape,
+    bcoo_rev as bcoo_rev,
+    bcoo_slice as bcoo_slice,
+    bcoo_sort_indices as bcoo_sort_indices,
+    bcoo_sort_indices_p as bcoo_sort_indices_p,
     bcoo_spdot_general_p as bcoo_spdot_general_p,
+    bcoo_squeeze as bcoo_squeeze,
+    bcoo_sum_duplicates as bcoo_sum_duplicates,
+    bcoo_sum_duplicates_p as bcoo_sum_duplicates_p,
     bcoo_todense as bcoo_todense,
     bcoo_todense_p as bcoo_todense_p,
     bcoo_transpose as bcoo_transpose,
@@ -208,14 +232,36 @@ from jax.experimental.sparse.bcoo import (
     BCOO as BCOO,
 )
 
+from jax.experimental.sparse.bcsr import (
+    bcsr_broadcast_in_dim as bcsr_broadcast_in_dim,
+    bcsr_concatenate as bcsr_concatenate,
+    bcsr_dot_general as bcsr_dot_general,
+    bcsr_dot_general_p as bcsr_dot_general_p,
+    bcsr_extract as bcsr_extract,
+    bcsr_extract_p as bcsr_extract_p,
+    bcsr_fromdense as bcsr_fromdense,
+    bcsr_fromdense_p as bcsr_fromdense_p,
+    bcsr_sum_duplicates as bcsr_sum_duplicates,
+    bcsr_todense as bcsr_todense,
+    bcsr_todense_p as bcsr_todense_p,
+    BCSR as BCSR,
+)
+
+from jax.experimental.sparse._base import (
+    JAXSparse as JAXSparse
+)
+
 from jax.experimental.sparse.api import (
     empty as empty,
+    eye as eye,
     todense as todense,
     todense_p as todense_p,
 )
 
 from jax.experimental.sparse.util import (
     CuSparseEfficiencyWarning as CuSparseEfficiencyWarning,
+    SparseEfficiencyError as SparseEfficiencyError,
+    SparseEfficiencyWarning as SparseEfficiencyWarning,
 )
 
 from jax.experimental.sparse.coo import (
@@ -248,3 +294,5 @@ from jax.experimental.sparse.transform import (
     sparsify as sparsify,
     SparseTracer as SparseTracer,
 )
+
+from jax.experimental.sparse import linalg as linalg

@@ -1,4 +1,4 @@
-# Copyright 2019 Google LLC
+# Copyright 2019 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -85,9 +85,32 @@ except ImportError:
 try:
   import tensorflow as tf
 except ImportError:
-  tf = None  # type: ignore
+  tf = None
 
-FLAGS = flags.FLAGS
+
+_FN = flags.DEFINE_string(
+    'fn', None, "Fully-qualified name of function that we're going to convert"
+)
+_INPUT_SHAPES = flags.DEFINE_string(
+    'input_shapes', None, 'Python dict indicating XLA shapes of params'
+)
+_CONSTANTS = flags.DEFINE_string(
+    'constants', '{}', 'Python dict giving constant values for some params'
+)
+_EVALED_CONSTANTS = flags.DEFINE_string(
+    'evaled_constants',
+    '{}',
+    'Python dict giving constant values for some params.  '
+    'Values in this dict that are of type str are evaluated '
+    'using ast.literal_eval.',
+)
+_IR_FORMAT = flags.DEFINE_enum(
+    'ir_format', 'HLO', ('HLO', 'TF'), 'Output format.'
+)
+_IR_DEST = flags.DEFINE_string('ir_dest', None, 'File to write IR to')
+_IR_HUMAN_DEST = flags.DEFINE_string(
+    'ir_human_dest', None, 'File to write human readable debug output'
+)
 
 
 def jax_to_ir(fn, input_shapes, *, constants=None, format):
@@ -95,7 +118,7 @@ def jax_to_ir(fn, input_shapes, *, constants=None, format):
 
   Args:
     fn: Function to convert.
-    input_shapes: List of tuples (arg name, jax.ShapedArray),
+    input_shapes: List of tuples (arg name, jax.core.ShapedArray),
       indicating the shapes of the arguments to fn.  The order of parameters in
       the resulting XLA program will match the order in this list.
     constants: Dict mapping function argument name to a Python value.  Specified
@@ -128,7 +151,7 @@ def jax_to_ir(fn, input_shapes, *, constants=None, format):
     return fn_curried(**dict(zip(arg_names, args)))
 
   if format == 'HLO':
-    comp = jax.xla_computation(ordered_wrapper)(*args)
+    comp = jax.jit(ordered_wrapper).lower(*args).compiler_ir('hlo')
     serialized_proto = comp.as_serialized_hlo_module_proto()
     debug_txt = comp.as_hlo_text()
   else:
@@ -163,25 +186,25 @@ def main(argv):
   if len(argv) != 1:
     raise app.UsageError('No positional arguments are accepted.')
 
-  if not FLAGS.ir_dest and not FLAGS.ir_human_dest:
+  if not _IR_DEST.value and not _IR_HUMAN_DEST.value:
     raise app.Error('At least one of --ir_dest and '
                     '--ir_human_dest is required.')
 
-  module_name, fn_name = FLAGS.fn.rsplit('.', 1)
+  module_name, fn_name = _FN.value.rsplit('.', 1)
   module = importlib.import_module(module_name)
   fn = getattr(module, fn_name)
 
   input_shapes = [(name, parse_shape_str(shape_str))
-                  for name, shape_str in literal_eval(FLAGS.input_shapes)]
+                  for name, shape_str in literal_eval(_INPUT_SHAPES.value)]
 
   # Parse --constants and --evaled_constants.
   constants = {}
-  for k, v in literal_eval(FLAGS.constants).items():
+  for k, v in literal_eval(_CONSTANTS.value).items():
     if isinstance(v, list):
       v = jnp.asarray(v)
     constants[k] = v
 
-  for k, v in literal_eval(FLAGS.evaled_constants).items():
+  for k, v in literal_eval(_EVALED_CONSTANTS.value).items():
     if isinstance(v, str):
       v = literal_eval(v)
     if isinstance(v, list):
@@ -192,14 +215,14 @@ def main(argv):
     constants[k] = v
 
   ir, debug_ir = jax_to_ir(fn, input_shapes, constants=constants,
-                           format=FLAGS.ir_format)
+                           format=_IR_FORMAT.value)
 
-  if FLAGS.ir_dest:
-    with open(FLAGS.ir_dest, 'wb') as f:
+  if _IR_DEST.value:
+    with open(_IR_DEST.value, 'wb') as f:
       f.write(ir)
 
-  if FLAGS.ir_human_dest:
-    with open(FLAGS.ir_human_dest, 'w') as f:
+  if _IR_HUMAN_DEST.value:
+    with open(_IR_HUMAN_DEST.value, 'w') as f:
       f.write(debug_ir)
 
 
@@ -213,33 +236,25 @@ def parse_shape_str(s):
     shape = tuple(int(d.strip()) for d in match.group(2).split(","))
   else:
     shape = ()
-  return jax.ShapedArray(shape, dtype)
+  return jax.core.ShapedArray(shape, dtype)
 
-_DT = {'pred': jnp.bool_,
-       'u8': jnp.uint8, 'u16': jnp.uint16, 'u32': jnp.uint32, 'u64': jnp.uint64,
-       's8': jnp.int8, 's16': jnp.int16, 's32': jnp.int32, 's64': jnp.int64,
-       'bf16': jnp.bfloat16,
-       'f16': jnp.float16, 'f32': jnp.float32, 'f64': jnp.float64,
-       'c64': jnp.complex64, 'c128': jnp.complex128}
+_DT = {
+    'pred': jnp.bool_,
+    'u4': jnp.uint4, 'u8': jnp.uint8, 'u16': jnp.uint16, 'u32': jnp.uint32, 'u64': jnp.uint64,
+    's4': jnp.int4, 's8': jnp.int8, 's16': jnp.int16, 's32': jnp.int32, 's64': jnp.int64,
+    'bf16': jnp.bfloat16,
+    'f16': jnp.float16, 'f32': jnp.float32, 'f64': jnp.float64,
+    'c64': jnp.complex64, 'c128': jnp.complex128
+}
+if hasattr(jnp, 'int2'):
+  _DT['s2'] = jnp.int2
+if hasattr(jnp, 'uint2'):
+  _DT['u2'] = jnp.uint2
+
 _SHAPE_RE = re.compile(f"^({'|'.join(_DT)})\\[\\s*(\\d*[\\s*,\\d+]*)\\s*\\]$")
 
 
 def set_up_flags():
-  flags.DEFINE_string(
-      'fn', None,
-      "Fully-qualified name of function that we're going to convert")
-  flags.DEFINE_string('input_shapes', None,
-                      'Python dict indicating XLA shapes of params')
-  flags.DEFINE_string('constants', '{}',
-                      'Python dict giving constant values for some params')
-  flags.DEFINE_string('evaled_constants', '{}',
-                      'Python dict giving constant values for some params.  '
-                      'Values in this dict that are of type str are evaluated '
-                      'using ast.literal_eval.')
-  flags.DEFINE_enum('ir_format', 'HLO', ('HLO', 'TF'), 'Output format.')
-  flags.DEFINE_string('ir_dest', None, 'File to write IR to')
-  flags.DEFINE_string('ir_human_dest', None,
-                      'File to write human readable debug output')
   flags.mark_flag_as_required('fn')
   flags.mark_flag_as_required('input_shapes')
 

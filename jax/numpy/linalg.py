@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2020 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,45 +12,39 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# flake8: noqa: F401
+# Note: import <name> as <name> is required for names to be exported.
+# See PEP 484 & https://github.com/jax-ml/jax/issues/7570
 
 from jax._src.numpy.linalg import (
   cholesky as cholesky,
+  cond as cond,
+  cross as cross,
   det as det,
+  diagonal as diagonal,
   eig as eig,
   eigh as eigh,
   eigvals as eigvals,
   eigvalsh as eigvalsh,
   inv as inv,
   lstsq as lstsq,
+  matmul as matmul,
+  matrix_norm as matrix_norm,
   matrix_power as matrix_power,
   matrix_rank as matrix_rank,
+  matrix_transpose as matrix_transpose,
+  multi_dot as multi_dot,
   norm as norm,
+  outer as outer,
   pinv as pinv,
   qr as qr,
   slogdet as slogdet,
   solve as solve,
   svd as svd,
-)
-from jax._src.third_party.numpy.linalg import (
-  cond as cond,
-  multi_dot as multi_dot,
+  svdvals as svdvals,
+  tensordot as tensordot,
   tensorinv as tensorinv,
   tensorsolve as tensorsolve,
+  trace as trace,
+  vector_norm as vector_norm,
+  vecdot as vecdot,
 )
-
-# Module initialization is encapsulated in a function to avoid accidental
-# namespace pollution.
-_NOT_IMPLEMENTED = []
-def _init():
-  import numpy as np
-  from jax._src.numpy import lax_numpy
-  from jax._src import util
-  # Builds a set of all unimplemented NumPy functions.
-  for name, func in util.get_module_functions(np.linalg).items():
-    if name not in globals():
-      _NOT_IMPLEMENTED.append(name)
-      globals()[name] = lax_numpy._not_implemented(func)
-
-_init()
-del _init

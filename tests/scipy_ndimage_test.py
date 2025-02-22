@@ -1,4 +1,4 @@
-# Copyright 2019 Google LLC
+# Copyright 2019 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,21 +14,20 @@
 
 
 from functools import partial
+import math
 
 import numpy as np
 
 from absl.testing import absltest
-from absl.testing import parameterized
 import scipy.ndimage as osp_ndimage
 
+import jax
 from jax import grad
 from jax._src import test_util as jtu
 from jax import dtypes
 from jax.scipy import ndimage as lsp_ndimage
-from jax._src.util import prod
 
-from jax.config import config
-config.parse_flags_with_absl()
+jax.config.parse_flags_with_absl()
 
 
 float_dtypes = jtu.dtypes.floating
@@ -59,32 +58,29 @@ def _fixed_ref_map_coordinates(input, coordinates, order, mode, cval=0.0):
 
 class NdimageTest(jtu.JaxTestCase):
 
-  @parameterized.named_parameters(jtu.cases_from_list(
-      {"testcase_name": "_{}_coordinates={}_order={}_mode={}_cval={}_impl={}_round={}".format(
-          jtu.format_shape_dtype_string(shape, dtype),
-          jtu.format_shape_dtype_string(coords_shape, coords_dtype),
-          order, mode, cval, impl, round_),
-       "rng_factory": rng_factory, "shape": shape,
-       "coords_shape": coords_shape, "dtype": dtype,
-       "coords_dtype": coords_dtype, "order": order, "mode": mode,
-       "cval": cval, "impl": impl, "round_": round_}
-      for shape in [(5,), (3, 4), (3, 4, 5)]
-      for coords_shape in [(7,), (2, 3, 4)]
-      for dtype in float_dtypes + int_dtypes
-      for coords_dtype in float_dtypes
-      for order in [0, 1]
-      for mode in ['wrap', 'constant', 'nearest', 'mirror', 'reflect']
-      for cval in ([0, -1] if mode == 'constant' else [0])
-      for impl, rng_factory in [
-          ("original", partial(jtu.rand_uniform, low=0, high=1)),
-          ("fixed", partial(jtu.rand_uniform, low=-0.75, high=1.75)),
-      ]
-      for round_ in [True, False]))
+  @jtu.sample_product(
+    [dict(mode=mode, cval=cval)
+     for mode in ['wrap', 'constant', 'nearest', 'mirror', 'reflect']
+     for cval in ([0, -1] if mode == 'constant' else [0])
+    ],
+    [dict(impl=impl, rng_factory=rng_factory)
+     for impl, rng_factory in [
+       ("original", partial(jtu.rand_uniform, low=0, high=1)),
+       ("fixed", partial(jtu.rand_uniform, low=-0.75, high=1.75)),
+     ]
+    ],
+    shape=[(5,), (3, 4), (3, 4, 5)],
+    coords_shape=[(7,), (2, 3, 4)],
+    dtype=float_dtypes + int_dtypes,
+    coords_dtype=float_dtypes,
+    order=[0, 1],
+    round_=[True, False],
+  )
   def testMapCoordinates(self, shape, dtype, coords_shape, coords_dtype, order,
                          mode, cval, impl, round_, rng_factory):
 
     def args_maker():
-      x = np.arange(prod(shape), dtype=dtype).reshape(shape)
+      x = np.arange(math.prod(shape), dtype=dtype).reshape(shape)
       coords = [(size - 1) * rng(coords_shape, coords_dtype) for size in shape]
       if round_:
         coords = [c.round().astype(int) for c in coords]
@@ -96,12 +92,14 @@ class NdimageTest(jtu.JaxTestCase):
     impl_fun = (osp_ndimage.map_coordinates if impl == "original"
                 else _fixed_ref_map_coordinates)
     osp_op = lambda x, c: impl_fun(x, c, order=order, mode=mode, cval=cval)
-    if dtype in float_dtypes:
-      epsilon = max([dtypes.finfo(dtypes.canonicalize_dtype(d)).eps
-                     for d in [dtype, coords_dtype]])
-      self._CheckAgainstNumpy(osp_op, lsp_op, args_maker, tol=100*epsilon)
-    else:
-      self._CheckAgainstNumpy(osp_op, lsp_op, args_maker, tol=0)
+
+    with jtu.strict_promotion_if_dtypes_match([dtype, int if round else coords_dtype]):
+      if dtype in float_dtypes:
+        epsilon = max(dtypes.finfo(dtypes.canonicalize_dtype(d)).eps
+                      for d in [dtype, coords_dtype])
+        self._CheckAgainstNumpy(osp_op, lsp_op, args_maker, tol=100*epsilon)
+      else:
+        self._CheckAgainstNumpy(osp_op, lsp_op, args_maker, tol=0)
 
   def testMapCoordinatesErrors(self):
     x = np.arange(5.0)
@@ -114,15 +112,10 @@ class NdimageTest(jtu.JaxTestCase):
     with self.assertRaisesRegex(ValueError, 'sequence of length'):
       lsp_ndimage.map_coordinates(x, [c, c], order=1)
 
-  def testMapCoordinateDocstring(self):
-    self.assertIn("Only nearest neighbor",
-                  lsp_ndimage.map_coordinates.__doc__)
-
-  @parameterized.named_parameters(jtu.cases_from_list(
-      {"testcase_name": "_{}_order={}".format(np.dtype(dtype), order),
-       "dtype": dtype, "order": order}
-      for dtype in float_dtypes + int_dtypes
-      for order in [0, 1]))
+  @jtu.sample_product(
+    dtype=float_dtypes + int_dtypes,
+    order=[0, 1],
+  )
   def testMapCoordinatesRoundHalf(self, dtype, order):
     x = np.arange(-3, 3, dtype=dtype)
     c = np.array([[.5, 1.5, 2.5, 3.5]])
@@ -131,15 +124,17 @@ class NdimageTest(jtu.JaxTestCase):
 
     lsp_op = lambda x, c: lsp_ndimage.map_coordinates(x, c, order=order)
     osp_op = lambda x, c: osp_ndimage.map_coordinates(x, c, order=order)
-    self._CheckAgainstNumpy(osp_op, lsp_op, args_maker)
+
+    with jtu.strict_promotion_if_dtypes_match([dtype, c.dtype]):
+      self._CheckAgainstNumpy(osp_op, lsp_op, args_maker)
 
   def testContinuousGradients(self):
-    # regression test for https://github.com/google/jax/issues/3024
+    # regression test for https://github.com/jax-ml/jax/issues/3024
 
     def loss(delta):
       x = np.arange(100.0)
       border = 10
-      indices = np.arange(x.size) + delta
+      indices = np.arange(x.size, dtype=x.dtype) + delta
       # linear interpolation of the linear function y=x should be exact
       shifted = lsp_ndimage.map_coordinates(x, [indices], order=1)
       return ((x - shifted) ** 2)[border:-border].mean()

@@ -1,4 +1,4 @@
-# Copyright 2018 Google LLC
+# Copyright 2018 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import opt_einsum
 import scipy.special
 
 from jax._src import dtypes
+from jax._src import util
 
 _slice = builtins.slice
 _max = builtins.max
@@ -44,6 +45,7 @@ nextafter = np.nextafter
 is_finite = np.isfinite
 
 exp = np.exp
+exp2 = np.exp2
 expm1 = np.expm1
 log = np.log
 log1p = np.log1p
@@ -68,6 +70,7 @@ asinh = np.arcsinh
 acosh = np.arccosh
 atanh = np.arctanh
 
+def logistic(x): return (1 / (1 + np.exp(-x))).astype(x.dtype)
 def betainc(a, b, x): return scipy.special.betainc(a, b, x).astype(x.dtype)
 def lgamma(x): return scipy.special.gammaln(x).astype(x.dtype)
 def digamma(x): return scipy.special.digamma(x).astype(x.dtype)
@@ -170,8 +173,40 @@ lt = np.less
 def convert_element_type(operand, dtype):
   return np.asarray(operand, dtype=dtype)
 
+def _bitcast_uint4_to_uint8(operand):
+  # Note: assumes little-endian byte order.
+  assert operand.dtype == 'uint4'
+  operand = operand.astype('uint8')
+  return operand[..., ::2] + (operand[..., 1::2] << 4)
+
+def _bitcast_uint8_to_uint4(operand):
+  # Note: assumes little-endian byte order.
+  assert operand.dtype == 'uint8'
+  result = np.zeros((*operand.shape[:-1], operand.shape[-1] * 2), dtype='uint4')
+  result[..., ::2] = (operand & 0b00001111).astype('uint4')
+  result[..., 1::2] = ((operand & 0b11110000) >> 4).astype('uint4')
+  return result
+
 def bitcast_convert_type(operand, dtype):
-  return np.asarray(operand).view(dtype)
+  operand = np.asarray(operand)
+  nbits_in = dtypes.bit_width(operand.dtype)
+  nbits_out = dtypes.bit_width(dtype)
+
+  if nbits_out > nbits_in:
+    assert operand.shape[-1] == nbits_out // nbits_in
+    out_shape = operand.shape[:-1]
+  elif nbits_out == nbits_in:
+    out_shape = operand.shape
+  else:
+    out_shape = (*operand.shape, nbits_in // nbits_out)
+
+  # Special handling for 4-bit integers.
+  if nbits_in == 4:
+    operand = _bitcast_uint4_to_uint8(operand.view('uint4'))
+  if nbits_out == 4:
+    operand = _bitcast_uint8_to_uint4(operand.view('uint8'))
+
+  return operand.view(dtype).reshape(out_shape)
 
 def clamp(min, operand, max):
   return np.clip(operand, np.clip(min, None, max), max).astype(operand.dtype)
@@ -236,6 +271,35 @@ def dot_general(lhs, rhs, dimension_numbers):
                    dtype=dtype)
   return out.astype(dtypes.bfloat16) if lhs.dtype == dtypes.bfloat16 else out
 
+def ragged_dot(
+    lhs,
+    rhs,
+    group_sizes,
+):
+  """Reference ragged dot implementation."""
+  m, lk = lhs.shape
+  group_count, rk, n = rhs.shape
+  assert lk == rk
+  assert group_count == group_sizes.shape[0]
+  assert lhs.dtype == rhs.dtype
+
+  out = np.zeros((m, n), dtype=lhs.dtype)
+  result_iota = np.expand_dims(np.arange(out.shape[0]), list(range(1, out.ndim)))
+  start = 0
+  for i, size in enumerate(group_sizes):
+    out += np.where(
+        np.logical_and(start <= result_iota, result_iota < (start + size)),
+        np.einsum(
+          "nk,km->nm",
+          lhs,
+          rhs[i, :, :],
+          dtype=np.float32 if lhs.dtype == dtypes.bfloat16 else None,
+        ),
+        np.zeros(out.shape, dtype=out.dtype),
+    )
+    start += size
+  return out.astype(dtypes.bfloat16) if lhs.dtype == dtypes.bfloat16 else out
+
 def broadcast(operand, sizes):
   return np.broadcast_to(operand, sizes + np.shape(operand))
 
@@ -256,7 +320,7 @@ def reshape(operand, new_sizes, dimensions=None):
 
 def pad(operand, padding_value, padding_config):
   # https://www.tensorflow.org/xla/operation_semantics#pad
-  lo, hi, interior = zip(*padding_config)
+  lo, hi, interior = util.unzip3(padding_config)
   # Handle first the positive edge padding and interior
   lo_pos, hi_pos = np.clip(lo, 0, None), np.clip(hi, 0, None)
   outshape = np.add(np.add(np.add(lo_pos, hi_pos), operand.shape),
@@ -337,12 +401,19 @@ def _conv(lhs, rhs, window_strides, pads):
       view, view_axes, rhs, rhs_axes, out_axes, use_blas=True)
 
 def padtype_to_pads(in_shape, filter_shape, window_strides, padding):
-  if padding.upper() == 'SAME':
+  if padding.upper() == 'SAME' or padding.upper() == 'SAME_LOWER':
     out_shape = np.ceil(np.true_divide(in_shape, window_strides)).astype(int)
     pad_sizes = [_max((out_size - 1) * stride + filter_size - in_size, 0)
                  for out_size, stride, filter_size, in_size
                  in zip(out_shape, window_strides, filter_shape, in_shape)]
-    return [(pad_size // 2, pad_size - pad_size // 2) for pad_size in pad_sizes]
+    if padding.upper() == 'SAME':
+      return [
+          (pad_size // 2, pad_size - pad_size // 2) for pad_size in pad_sizes
+      ]
+    else:
+      return [
+          (pad_size - pad_size // 2, pad_size // 2) for pad_size in pad_sizes
+      ]
   else:
     return [(0, 0)] * len(in_shape)
 

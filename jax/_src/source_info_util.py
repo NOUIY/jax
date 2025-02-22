@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2020 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,17 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
+from collections.abc import Iterator
 import contextlib
 import dataclasses
 import functools
 import itertools
 import os.path
+import re
+import sys
+import sysconfig
 import threading
 import types
-from typing import Optional, Iterator, NamedTuple, Union, Tuple
+from typing import NamedTuple
 
 import jax.version
-from jax._src.lib import xla_client, xla_extension_version
+from jax._src.lib import xla_client
 
 from jax._src import traceback_util
 traceback_util.register_exclusion(__file__)
@@ -33,111 +39,170 @@ Traceback = xla_client.Traceback
 class Frame(NamedTuple):
   file_name: str
   function_name: str
-  line_num: int
+  start_line: int
+  start_column: int
+  end_line: int
+  end_column: int
 
 
-_exclude_paths = [os.path.dirname(jax.version.__file__)]
+_exclude_paths: list[str] = [
+    # Attach the separator to make sure that .../jax does not end up matching
+    # .../jax_triton and other packages that might have a jax prefix.
+    os.path.dirname(jax.version.__file__) + os.sep,
+    # Also exclude stdlib as user frames. In a non-standard Python runtime,
+    # the following two may be different.
+    sysconfig.get_path('stdlib'),
+    os.path.dirname(sysconfig.__file__)
+]
 
-def register_exclusion(path):
+@functools.cache
+def _exclude_path_regex() -> re.Pattern[str]:
+  # The regex below would not handle an empty set of exclusions correctly.
+  assert len(_exclude_paths) > 0
+  return re.compile('|'.join(f'^{re.escape(path)}' for path in _exclude_paths))
+
+
+def register_exclusion(path: str):
   _exclude_paths.append(path)
+  _exclude_path_regex.cache_clear()
+  is_user_filename.cache_clear()
+
+
+# Explicit inclusions take priority over exclude paths.
+_include_paths: list[str] = []
+
+@functools.cache
+def _include_path_regex() -> re.Pattern[str]:
+  patterns = [f'^{re.escape(path)}' for path in _include_paths]
+  patterns.append('_test.py$')
+  return re.compile('|'.join(patterns))
+
+def register_inclusion(path: str):
+  _include_paths.append(path)
+  _include_path_regex.cache_clear()
+  is_user_filename.cache_clear()
+
 
 class Scope(NamedTuple):
   name: str
 
-  def wrap(self, stack: Tuple[str, ...]) -> Tuple[str, ...]:
-    return (self.name, *stack)
+  def wrap(self, stack: list[str]):
+    stack.append(self.name)
 
 class Transform(NamedTuple):
   name: str
 
-  def wrap(self, stack: Tuple[str, ...]) -> Tuple[str, ...]:
-    return tuple(map(lambda x: f'{self.name}({x})', stack))
+  def wrap(self, stack: list[str]):
+    if stack:
+      stack[-1] = f'{self.name}({stack[-1]})'
 
 @dataclasses.dataclass(frozen=True)
 class NameStack:
-  stack: Tuple[Union[Scope, Transform], ...] = ()
+  stack: tuple[Scope | Transform, ...] = ()
 
-  def extend(self, name: Union[Tuple[str, ...], str]) -> 'NameStack':
-    if not isinstance(name, tuple):
-      name = (name,)
-    scopes = tuple(map(Scope, name))
-    return NameStack(self.stack + scopes)
+  def extend(self, name: str) -> NameStack:
+    return NameStack((*self.stack, Scope(name)))
 
-  def wrap_name(self, name: str) -> str:
-    if not self.stack:
-      return name
-    return f'{str(self)}/{name}'
-
-  def transform(self, transform_name: str) -> 'NameStack':
+  def transform(self, transform_name: str) -> NameStack:
     return NameStack((*self.stack, Transform(transform_name)))
 
-  def __getitem__(self, idx) -> 'NameStack':
+  def __getitem__(self, idx: slice) -> NameStack:
     return NameStack(self.stack[idx])
 
   def __len__(self):
     return len(self.stack)
 
-  def __add__(self, other: 'NameStack') -> 'NameStack':
+  def __add__(self, other: NameStack) -> NameStack:
     return NameStack(self.stack + other.stack)
 
-  def __radd__(self, other: 'NameStack') -> 'NameStack':
+  def __radd__(self, other: NameStack) -> NameStack:
     return NameStack(other.stack + self.stack)
 
   def __str__(self) -> str:
-    scope: Tuple[str, ...] = ()
+    scope: list[str] = []
     for elem in self.stack[::-1]:
-      scope = elem.wrap(scope)
-    return '/'.join(scope)
+      elem.wrap(scope)
+    return '/'.join(reversed(scope))
 
-class SourceInfo(NamedTuple):
-  traceback: Optional[Traceback]
+
+def new_name_stack(name: str = '') -> NameStack:
+  name_stack = NameStack()
+  if name:
+    name_stack = name_stack.extend(name)
+  return name_stack
+
+
+class SourceInfo:
+  traceback: Traceback | None
   name_stack: NameStack
 
-  def replace(self, *, traceback: Optional[Traceback] = None,
-      name_stack: Optional[NameStack] = None) -> 'SourceInfo':
-    traceback = traceback or self.traceback
-    name_stack = self.name_stack if name_stack is None else name_stack
-    return self._replace(traceback=traceback, name_stack=name_stack)
+  # It's slightly faster to use a class with __slots__ than a NamedTuple.
+  __slots__ = ['traceback', 'name_stack']
+
+  def __init__(self, traceback: Traceback | None, name_stack: NameStack):
+    self.traceback = traceback
+    self.name_stack = name_stack
+
+  def replace(self, *, traceback: Traceback | None = None,
+      name_stack: NameStack | None = None) -> SourceInfo:
+    return SourceInfo(
+        self.traceback if traceback is None else traceback,
+        self.name_stack if name_stack is None else name_stack
+    )
 
 def new_source_info() -> SourceInfo:
   return SourceInfo(None, NameStack())
 
+@functools.cache
 def is_user_filename(filename: str) -> bool:
   """Heuristic that guesses the identity of the user's code in a stack trace."""
-  return (filename.endswith("_test.py") or
-          not any(filename.startswith(p) for p in _exclude_paths))
+  return (_include_path_regex().search(filename) is not None
+          or _exclude_path_regex().search(filename) is None)
 
-def _raw_frame_to_frame(code: types.CodeType, lasti: int) -> Frame:
-  return Frame(file_name=code.co_filename,
-               function_name=code.co_name,
-               line_num=xla_client.Traceback.code_addr2line(code, lasti))
+if sys.version_info >= (3, 11):
+  def raw_frame_to_frame(code: types.CodeType, lasti: int) -> Frame:
+    loc = xla_client.Traceback.code_addr2location(code, lasti)
+    start_line, start_column, end_line, end_column = loc
+    return Frame(file_name=code.co_filename,
+                function_name=code.co_qualname,
+                start_line=start_line, start_column=start_column,
+                end_line=end_line, end_column=end_column)
+else:
+  def raw_frame_to_frame(code: types.CodeType, lasti: int) -> Frame:
+    # pre-3.11 co_qualname does not exist, use co_name
+    return Frame(file_name=code.co_filename,
+                function_name=code.co_name,
+                start_line=xla_client.Traceback.code_addr2line(code, lasti),
+                start_column=0, end_line=0, end_column=0)
 
 def user_frames(source_info: SourceInfo) -> Iterator[Frame]:
   """Iterator over the user's frames, filtering jax-internal frames."""
-  # Guess the user's frame is the innermost frame not in the jax source tree
-  # We don't use traceback_util.path_starts_with because that incurs filesystem
-  # access, which may be slow; we call this function when e.g. adding source
-  # provenance annotations to XLA lowerings, so we don't want to incur the cost.
-  # We consider files that end with _test.py as user frames, to allow testing
-  # this mechanism from tests.
+  # Guess the user's frame is the innermost frame not in the jax source tree or
+  # Python stdlib. We don't use traceback_util.path_starts_with because that
+  # incurs filesystem access, which may be slow; we call this function when
+  # e.g. adding source provenance annotations to XLA lowerings, so we don't
+  # want to incur the cost. We consider files that end with _test.py as user
+  # frames, to allow testing this mechanism from tests.
   traceback = source_info.traceback
-  # TODO(phawkins): drop this test when jaxlib 0.3 becomes the minimum.
-  if xla_extension_version >= 57:
-    code, lasti = traceback.raw_frames() if traceback else ([], [])
-    return (_raw_frame_to_frame(code[i], lasti[i]) for i in range(len(code))  # type: ignore
-            if is_user_filename(code[i].co_filename))
-  else:
-    return (x for x in (traceback.frames if traceback else [])  # type: ignore
-            if is_user_filename(x.file_name))
+  code, lasti = traceback.raw_frames() if traceback else ([], [])
+  return (raw_frame_to_frame(code[i], lasti[i]) for i in range(len(code))
+          if is_user_filename(code[i].co_filename))
 
 @functools.lru_cache(maxsize=64)
-def user_frame(source_info: SourceInfo) -> Optional[Frame]:
+def user_frame(source_info: SourceInfo) -> Frame | None:
   return next(user_frames(source_info), None)
+
+def _summarize_frame(frame: Frame) -> str:
+  if frame.start_column != 0:
+    return (f"{frame.file_name}:{frame.start_line}:{frame.start_column} "
+            f"({frame.function_name})")
+  else:
+    return f"{frame.file_name}:{frame.start_line} ({frame.function_name})"
 
 def summarize(source_info: SourceInfo, num_frames=1) -> str:
   frames = itertools.islice(user_frames(source_info), num_frames)
-  frame_strs = [f"{frame.file_name}:{frame.line_num} ({frame.function_name})"
-                if frame else "unknown" for frame in frames]
+  frame_strs = [_summarize_frame(frame) if frame else "unknown"
+                for frame in frames]
   return '\n'.join(reversed(frame_strs))
 
 class _SourceInfoContext(threading.local):
@@ -169,7 +234,7 @@ def has_user_context(e):
   return False
 
 @contextlib.contextmanager
-def user_context(c: Optional[Traceback], *, name_stack: Optional[NameStack] = None):
+def user_context(c: Traceback | None, *, name_stack: NameStack | None = None):
   prev = _source_info_context.context
   _source_info_context.context = _source_info_context.context.replace(
       traceback=c, name_stack=name_stack)

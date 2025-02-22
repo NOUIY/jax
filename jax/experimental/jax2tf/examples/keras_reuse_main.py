@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2020 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,13 +18,16 @@ Includes the flags from saved_model_main.py.
 See README.md.
 """
 import logging
+import warnings
 from absl import app
 from absl import flags
-from jax.experimental.jax2tf.examples import mnist_lib  # type: ignore
-from jax.experimental.jax2tf.examples import saved_model_main  # type: ignore
-import tensorflow as tf  # type: ignore
+from jax.experimental.jax2tf.examples import mnist_lib
+from jax.experimental.jax2tf.examples import saved_model_main
+import tensorflow as tf
 import tensorflow_datasets as tfds  # type: ignore
-import tensorflow_hub as hub  # type: ignore
+with warnings.catch_warnings():
+  warnings.simplefilter("ignore")
+  import tensorflow_hub as hub  # type: ignore
 
 
 FLAGS = flags.FLAGS
@@ -47,8 +50,7 @@ def main(_):
   with strategy.scope():
     images = tf.keras.layers.Input(
         mnist_lib.input_shape, batch_size=mnist_lib.train_batch_size)
-    # We do not yet train the SavedModel, due to b/123499169.
-    keras_feature_extractor = hub.KerasLayer(feature_model_dir, trainable=False)
+    keras_feature_extractor = hub.KerasLayer(feature_model_dir, trainable=True)
     features = keras_feature_extractor(images)
     predictor = tf.keras.layers.Dense(10, activation="softmax")
     predictions = predictor(features)
@@ -66,7 +68,7 @@ def main(_):
       tfds.Split.TEST, batch_size=mnist_lib.test_batch_size)
   keras_model.fit(train_ds, epochs=FLAGS.num_epochs, validation_data=test_ds)
 
-  if FLAGS.show_images:
+  if saved_model_main.SHOW_IMAGES.value:
     mnist_lib.plot_images(
         test_ds,
         1,

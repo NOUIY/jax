@@ -1,4 +1,4 @@
-# Copyright 2018 Google LLC
+# Copyright 2018 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,24 +12,46 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
-import scipy.stats as osp_stats
-
 from jax import lax
-from jax._src.numpy import lax_numpy as jnp
-from jax._src.numpy.util import _wraps
+import jax.numpy as jnp
+from jax._src.lax.lax import _const as _lax_const
+from jax._src.numpy.util import promote_dtypes_inexact
 from jax.scipy.special import gammaln, xlogy
-from jax._src.numpy.lax_numpy import _promote_dtypes_inexact
+from jax._src.typing import Array, ArrayLike
 
 
-def _is_simplex(x):
+def _is_simplex(x: Array) -> Array:
   x_sum = jnp.sum(x, axis=0)
   return jnp.all(x > 0, axis=0) & (abs(x_sum - 1) < 1E-6)
 
 
-@_wraps(osp_stats.dirichlet.logpdf, update_doc=False)
-def logpdf(x, alpha):
-  x, alpha = _promote_dtypes_inexact(x, alpha)
+def logpdf(x: ArrayLike, alpha: ArrayLike) -> Array:
+  r"""Dirichlet log probability distribution function.
+
+  JAX implementation of :obj:`scipy.stats.dirichlet` ``logpdf``.
+
+  The Dirichlet probability density function is
+
+  .. math::
+
+     f(\mathbf{x}) = \frac{1}{B(\mathbf{\alpha})} \prod_{i=1}^K x_i^{\alpha_i - 1}
+
+  where :math:`B(\mathbf{\alpha})` is the :func:`~jax.scipy.special.beta` function
+  in a :math:`K`-dimensional vector space.
+
+  Args:
+    x: arraylike, value at which to evaluate the PDF
+    alpha: arraylike, distribution shape parameter
+
+  Returns:
+    array of logpdf values.
+
+  See Also:
+    :func:`jax.scipy.stats.dirichlet.pdf`
+  """
+  return _logpdf(*promote_dtypes_inexact(x, alpha))
+
+def _logpdf(x: Array, alpha: Array) -> Array:
   if alpha.ndim != 1:
     raise ValueError(
       f"`alpha` must be one-dimensional; got alpha.shape={alpha.shape}"
@@ -39,7 +61,7 @@ def logpdf(x, alpha):
       "`x` must have either the same number of entries as `alpha` "
       f"or one entry fewer; got x.shape={x.shape}, alpha.shape={alpha.shape}"
     )
-  one = jnp._constant_like(x, 1)
+  one = _lax_const(x, 1)
   if x.shape[0] != alpha.shape[0]:
     x = jnp.concatenate([x, lax.sub(one, x.sum(0, keepdims=True))], axis=0)
   normalize_term = jnp.sum(gammaln(alpha)) - gammaln(jnp.sum(alpha))
@@ -49,6 +71,28 @@ def logpdf(x, alpha):
   return jnp.where(_is_simplex(x), log_probs, -jnp.inf)
 
 
-@_wraps(osp_stats.dirichlet.pdf, update_doc=False)
-def pdf(x, alpha):
+def pdf(x: ArrayLike, alpha: ArrayLike) -> Array:
+  r"""Dirichlet probability distribution function.
+
+  JAX implementation of :obj:`scipy.stats.dirichlet` ``pdf``.
+
+  The Dirichlet probability density function is
+
+  .. math::
+
+     f(\mathbf{x}) = \frac{1}{B(\mathbf{\alpha})} \prod_{i=1}^K x_i^{\alpha_i - 1}
+
+  where :math:`B(\mathbf{\alpha})` is the :func:`~jax.scipy.special.beta` function
+  in a :math:`K`-dimensional vector space.
+
+  Args:
+    x: arraylike, value at which to evaluate the PDF
+    alpha: arraylike, distribution shape parameter
+
+  Returns:
+    array of pdf values.
+
+  See Also:
+    :func:`jax.scipy.stats.dirichlet.logpdf`
+  """
   return lax.exp(logpdf(x, alpha))

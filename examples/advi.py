@@ -1,4 +1,4 @@
-# Copyright 2018 Google LLC
+# Copyright 2018 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -78,7 +78,7 @@ if __name__ == "__main__":
 
     @jit
     def objective(params, t):
-        rng = random.PRNGKey(t)
+        rng = random.key(t)
         return -batch_elbo(funnel_log_density, rng, params, num_samples)
 
     # Set up figure.
@@ -92,7 +92,7 @@ if __name__ == "__main__":
     approx_dist = lambda x, params: jnp.exp(diag_gaussian_logpdf(x, *params))
 
     def callback(params, t):
-        print("Iteration {} lower bound {}".format(t, objective(params, t)))
+        print(f"Iteration {t} lower bound {objective(params, t)}")
 
         plt.cla()
         X, Y, Z = mesh_eval(target_dist, x_limits, y_limits, 1)
@@ -107,7 +107,7 @@ if __name__ == "__main__":
         # Plot random samples from variational distribution.
         # Here we clone the rng used in computing the objective
         # so that we can show exactly the same samples.
-        rngs = random.split(random.PRNGKey(t), num_samples)
+        rngs = random.split(random.key(t), num_samples)
         samples = vmap(diag_gaussian_sample, in_axes=(0, None, None))(rngs, *params)
         ax.plot(samples[:, 0], samples[:, 1], 'b.')
 

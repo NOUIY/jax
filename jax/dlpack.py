@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2020 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,5 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# flake8: noqa: F401
-from jax._src.dlpack import (to_dlpack, from_dlpack, SUPPORTED_DTYPES)
+from jax._src.dlpack import (
+  to_dlpack as to_dlpack,
+  from_dlpack as from_dlpack,
+  SUPPORTED_DTYPES as SUPPORTED_DTYPES,
+)

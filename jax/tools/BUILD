@@ -1,4 +1,4 @@
-# Copyright 2019 Google LLC
+# Copyright 2019 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,9 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("@rules_python//python:defs.bzl", "py_library")
+load(
+    "//jaxlib:jax.bzl",
+    "py_deps",
+)
+
 licenses(["notice"])
 
-package(default_visibility = ["//visibility:public"])
+package(
+    default_applicable_licenses = [],
+    default_visibility = ["//visibility:public"],
+)
 
 py_library(
     name = "jax_to_ir",
@@ -24,7 +33,7 @@ py_library(
         "ignore_for_dep=third_party.py.tensorflow",
     ],
     deps = [
-        "//third_party/py/jax",
+        "//jax",
     ],
 )
 
@@ -32,8 +41,7 @@ py_library(
     name = "jax_to_ir_with_tensorflow",
     srcs = ["jax_to_ir.py"],
     deps = [
-        "//third_party/py/jax",
-        "//third_party/py/jax/experimental/jax2tf",
-        "//third_party/py/tensorflow",
-    ],
+        "//jax",
+        "//jax/experimental/jax2tf",
+    ] + py_deps("tensorflow_core"),
 )

@@ -1,5 +1,72 @@
-# Profiling JAX programs
+# Profiling computation
 
+<!--* freshness: { reviewed: '2024-03-18' } *-->
+
+## Viewing program traces with Perfetto
+
+We can use the JAX profiler to generate traces of a JAX program that can be
+visualized using the [Perfetto visualizer](https://ui.perfetto.dev). Currently,
+this method blocks the program until a link is clicked and the Perfetto UI loads
+the trace. If you wish to get profiling information without any interaction,
+check out the Tensorboard profiler below.
+
+```python
+with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=True):
+  # Run the operations to be profiled
+  key = jax.random.key(0)
+  x = jax.random.normal(key, (5000, 5000))
+  y = x @ x
+  y.block_until_ready()
+```
+
+After this computation is done, the program will prompt you to open a link to
+`ui.perfetto.dev`. When you open the link, the Perfetto UI will load the trace
+file and open a visualizer.
+
+![Perfetto trace viewer](_static/perfetto.png)
+
+Program execution will continue after loading the link. The link is no longer
+valid after opening once, but it will redirect to a new URL that remains valid.
+You can then click the "Share" button in the Perfetto UI to create a permalink
+to the trace that can be shared with others.
+
+### Remote profiling
+
+When profiling code that is running remotely (for example on a hosted VM),
+you need to establish an SSH tunnel on port 9001 for the link to work. You can
+do that with this command:
+```bash
+$ ssh -L 9001:127.0.0.1:9001 <user>@<host>
+```
+or if you're using Google Cloud:
+```bash
+$ gcloud compute ssh <machine-name> -- -L 9001:127.0.0.1:9001
+```
+
+### Manual capture
+
+Instead of capturing traces programmatically using `jax.profiler.trace`, you can
+instead start a profiling server in the script of interest by calling
+`jax.profiler.start_server(<port>)`. If you only need the profiler server to be
+active for a portion of your script, you can shut it down by calling
+`jax.profiler.stop_server()`.
+
+Once the script is running and after the profiler server has started, we can
+manually capture and trace by running:
+```bash
+$ python -m jax.collect_profile <port> <duration_in_ms>
+```
+
+By default, the resulting trace information is dumped into a temporary directory
+but this can be overridden by passing in `--log_dir=<directory of choice>`.
+Also, by default, the program will prompt you to open a link to
+`ui.perfetto.dev`. When you open the link, the Perfetto UI will load the trace
+file and open a visualizer. This feature is disabled by passing in
+`--no_perfetto_link` into the command. Alternatively, you can also point
+Tensorboard to the `log_dir` to analyze the trace (see the
+"Tensorboard Profiling" section below).
+
+(tensorboard-profiling)=
 ## TensorBoard profiling
 
 [TensorBoard's
@@ -16,19 +83,21 @@ The TensorBoard profiler is only available with the version of TensorBoard
 bundled with TensorFlow.
 
 ```shell
-pip install tensorflow tbp-nightly
+pip install tensorflow tensorboard-plugin-profile
 ```
 
 If you already have TensorFlow installed, you only need to install the
-`tbp-nightly` pip package. Be careful to only install one version of TensorFlow
-or TensorBoard, otherwise you may encounter the "duplicate plugins" error
-described {ref}`below <multiple_installs>`.
+`tensorboard-plugin-profile` pip package. Be careful to only install one version
+of TensorFlow or TensorBoard, otherwise you may encounter the "duplicate
+plugins" error described {ref}`below <multiple_installs>`. See
+<https://www.tensorflow.org/guide/profiler> for more information on installing
+TensorBoard.
 
-(We recommend `tbp-nightly` because `tensorboard-plugin-profile==2.4.0` is
-incompatible with TensorBoard's experimental fast data loading logic. This
-should be resolved with `tensorboard-plugin-profile==2.5.0` when it's
-released. These instructions were tested with `tensorflow==2.4.1` and
-`tbp-nightly==2.5.0a20210428`.)
+Nightly version of TensorBoard profiler requires nightly tensorflow and
+tensorboard
+```shell
+pip install tf-nightly tb-nightly tbp-nightly
+```
 
 ### Programmatic capture
 
@@ -46,7 +115,7 @@ import jax
 jax.profiler.start_trace("/tmp/tensorboard")
 
 # Run the operations to be profiled
-key = jax.random.PRNGKey(0)
+key = jax.random.key(0)
 x = jax.random.normal(key, (5000, 5000))
 y = x @ x
 y.block_until_ready()
@@ -64,8 +133,8 @@ alternative to `start_trace` and `stop_trace`:
 ```python
 import jax
 
-with jax.profiler.trace():
-  key = jax.random.PRNGKey(0)
+with jax.profiler.trace("/tmp/tensorboard"):
+  key = jax.random.key(0)
   x = jax.random.normal(key, (5000, 5000))
   y = x @ x
   y.block_until_ready()
@@ -87,11 +156,13 @@ example. You can specify a different port with the `--port` flag. See
 Then, either select "Profile" in the upper-right dropdown menu, or go directly
 to <http://localhost:6006/#profile>. Available traces appear in the "Runs"
 dropdown menu on the left. Select the run you're interested in, and then under
-"Tools", select "trace_viewer".  You should now see a timeline of the
+"Tools", select `trace_viewer`.  You should now see a timeline of the
 execution. You can use the WASD keys to navigate the trace, and click or drag to
 select events to see more details at the bottom. See [these TensorFlow
 docs](https://www.tensorflow.org/tensorboard/tensorboard_profiling_keras#use_the_tensorflow_profiler_to_profile_model_training_performance)
 for more details on using the trace viewer.
+
+You can also use the `memory_viewer`, `op_profile`, and `graph_viewer` tools.
 
 ### Manual capture via TensorBoard
 
@@ -113,13 +184,12 @@ from a running program.
 
    ```python
    import jax.profiler
-   server = jax.profiler.start_server(9999)
+   jax.profiler.start_server(9999)
    ```
 
     This starts the profiler server that TensorBoard connects to. The profiler
-    server must be running before you move on to the next step. It will remain
-    alive and listening until the object returned by `start_server()` is
-    destroyed.
+    server must be running before you move on to the next step. When you're done
+    using the server, you can call `jax.profiler.stop_server()` to shut it down.
 
     If you'd like to profile a snippet of a long-running program (e.g. a long
     training loop), you can put this at the beginning of the program and start
@@ -143,13 +213,16 @@ from a running program.
 1. After the capture finishes, TensorBoard should automatically refresh. (Not
    all of the TensorBoard profiling features are hooked up with JAX, so it may
    initially look like nothing was captured.) On the left under "Tools", select
-   "trace_viewer".
+   `trace_viewer`.
 
    You should now see a timeline of the execution. You can use the WASD keys to
    navigate the trace, and click or drag to select events to see more details at
    the bottom. See [these TensorFlow
    docs](https://www.tensorflow.org/tensorboard/tensorboard_profiling_keras#use_the_tensorflow_profiler_to_profile_model_training_performance)
-   for more details on using the trace viewer.<br /><br />
+   for more details on using the trace viewer.
+
+   You can also use the `memory_viewer`, `op_profile`, and `graph_viewer`
+   tools.<br /><br />
 
 ### Adding custom trace events
 
@@ -216,11 +289,10 @@ machine. Use the following SSH command to forward the default TensorBoard port
 ssh -L 6006:localhost:6006 <remote server address>
 ```
 
-#### Profiling on a Cloud TPU VM
-
-Cloud TPU VMs come with a special version of TensorFlow pre-installed, so
-there's no need to explicitly install it, and doing so can cause TensorFlow to
-stop working on TPU. Just `pip install tbp-nightly`.
+or if you're using Google Cloud:
+```bash
+$ gcloud compute ssh <machine-name> -- -L 6006:localhost:6006
+```
 
 (multiple_installs)=
 #### Multiple TensorBoard installs

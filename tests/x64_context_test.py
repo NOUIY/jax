@@ -1,4 +1,4 @@
-# Copyright 2021 Google LLC
+# Copyright 2021 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,38 +19,22 @@ import time
 import unittest
 
 from absl.testing import absltest
-from absl.testing import parameterized
 import numpy as np
 
 import jax
-from jax._src import api
 from jax import lax
 from jax import random
-from jax.config import config
 from jax.experimental import enable_x64, disable_x64
 import jax.numpy as jnp
 import jax._src.test_util as jtu
 
-config.parse_flags_with_absl()
-
-
-def _maybe_jit(jit_type, func, *args, **kwargs):
-  if jit_type == "python":
-    return api._python_jit(func, *args, **kwargs)
-  elif jit_type == "cpp":
-    return api._cpp_jit(func, *args, **kwargs)
-  elif jit_type is None:
-    return func
-  else:
-    raise ValueError(f"Unrecognized jit_type={jit_type!r}")
+jax.config.parse_flags_with_absl()
 
 
 class X64ContextTests(jtu.JaxTestCase):
-  @parameterized.named_parameters(jtu.cases_from_list(
-      {"testcase_name": "_jit={}".format(jit), "jit": jit}
-      for jit in ["python", "cpp", None]))
+  @jtu.sample_product(jit=jtu.JIT_IMPLEMENTATION)
   def test_make_array(self, jit):
-    func = _maybe_jit(jit, lambda: jnp.array(np.float64(0)))
+    func = jit(lambda: jnp.array(np.float64(0)))
     dtype_start = func().dtype
     with enable_x64():
       self.assertEqual(func().dtype, "float64")
@@ -58,20 +42,18 @@ class X64ContextTests(jtu.JaxTestCase):
       self.assertEqual(func().dtype, "float32")
     self.assertEqual(func().dtype, dtype_start)
 
-  @parameterized.named_parameters(
-      jtu.cases_from_list({
-          "testcase_name": "_jit={}_f_{}".format(jit, f.__name__),
-          "jit": jit,
-          "enable_or_disable": f
-      } for jit in ["python", "cpp", None] for f in [enable_x64, disable_x64]))
+  @jtu.sample_product(
+    jit=jtu.JIT_IMPLEMENTATION,
+    enable_or_disable=[enable_x64, disable_x64],
+  )
   def test_correctly_capture_default(self, jit, enable_or_disable):
     # The fact we defined a jitted function with a block with a different value
-    # of `config.enable_x64` has no impact on the output.
+    # of `jax.config.enable_x64` has no impact on the output.
     with enable_or_disable():
-      func = _maybe_jit(jit, lambda: jnp.array(np.float64(0)))
+      func = jit(lambda: jnp.array(np.float64(0)))
       func()
 
-    expected_dtype = "float64" if config._read("jax_enable_x64") else "float32"
+    expected_dtype = "float64" if jax.config._read("jax_enable_x64") else "float32"
     self.assertEqual(func().dtype, expected_dtype)
 
     with enable_x64():
@@ -79,14 +61,12 @@ class X64ContextTests(jtu.JaxTestCase):
     with disable_x64():
       self.assertEqual(func().dtype, "float32")
 
-  @unittest.skipIf(jtu.device_under_test() != "cpu", "Test presumes CPU precision")
-  @parameterized.named_parameters(jtu.cases_from_list(
-      {"testcase_name": "_jit={}".format(jit), "jit": jit}
-      for jit in ["python", "cpp", None]))
+  @jtu.sample_product(jit=jtu.JIT_IMPLEMENTATION)
+  @jtu.run_on_devices("cpu")  # Test presumes CPU precision
   def test_near_singular_inverse(self, jit):
     rng = jtu.rand_default(self.rng())
 
-    @partial(_maybe_jit, jit, static_argnums=1)
+    @partial(jit, static_argnums=1)
     def near_singular_inverse(N=5, eps=1E-40):
       X = rng((N, N), dtype='float64')
       X = jnp.asarray(X)
@@ -101,11 +81,9 @@ class X64ContextTests(jtu.JaxTestCase):
       result_32 = near_singular_inverse()
       self.assertTrue(jnp.all(~jnp.isfinite(result_32)))
 
-  @parameterized.named_parameters(jtu.cases_from_list(
-      {"testcase_name": "_jit={}".format(jit), "jit": jit}
-      for jit in ["python", "cpp", None]))
+  @jtu.sample_product(jit=jtu.JIT_IMPLEMENTATION)
   def test_while_loop(self, jit):
-    @partial(_maybe_jit, jit)
+    @jit
     def count_to(N):
       return lax.while_loop(lambda x: x < N, lambda x: x + 1.0, 0.0)
 
@@ -132,8 +110,12 @@ class X64ContextTests(jtu.JaxTestCase):
       self.assertEqual(x64.result(), jnp.int64)
       self.assertEqual(x32.result(), jnp.int32)
 
+  @jax.legacy_prng_key('allow')
+  @jax.debug_key_reuse(False)
+  @jtu.ignore_warning(category=UserWarning,
+                      message="Explicitly requested dtype float64  is not available")
   def test_jit_cache(self):
-    if jtu.device_under_test() == "tpu":
+    if jtu.test_device_matches(["tpu"]):
       self.skipTest("64-bit random not available on TPU")
 
     f = partial(random.uniform, random.PRNGKey(0), (1,), 'float64', -1, 1)
@@ -146,7 +128,7 @@ class X64ContextTests(jtu.JaxTestCase):
 
   @unittest.skip("test fails, see #8552")
   def test_convert_element_type(self):
-    # Regression test for part of https://github.com/google/jax/issues/5982
+    # Regression test for part of https://github.com/jax-ml/jax/issues/5982
     with enable_x64():
       x = jnp.int64(1)
     self.assertEqual(x.dtype, jnp.int64)
