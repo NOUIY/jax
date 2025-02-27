@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2020 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,17 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from absl.testing import absltest, parameterized
+from absl.testing import absltest
 import numpy as np
+import scipy
 import scipy.optimize
 
+import jax
 from jax import numpy as jnp
 from jax._src import test_util as jtu
 from jax import jit
-from jax.config import config
 import jax.scipy.optimize
 
-config.parse_flags_with_absl()
+jax.config.parse_flags_with_absl()
 
 
 def rosenbrock(np):
@@ -66,14 +67,13 @@ def zakharovFromIndices(x, ii):
 
 class TestBFGS(jtu.JaxTestCase):
 
-  @parameterized.named_parameters(jtu.cases_from_list(
-    {"testcase_name": "_func={}_maxiter={}".format(func_and_init[0].__name__, maxiter),
-     "maxiter": maxiter, "func_and_init": func_and_init}
-    for maxiter in [None]
-    for func_and_init in [(rosenbrock, np.zeros(2)),
-                          (himmelblau, np.zeros(2)),
-                          (matyas, np.ones(2) * 6.),
-                          (eggholder, np.ones(2) * 100.)]))
+  @jtu.sample_product(
+    maxiter=[None],
+    func_and_init=[(rosenbrock, np.zeros(2, dtype='float32')),
+                   (himmelblau, np.ones(2, dtype='float32')),
+                   (matyas, np.ones(2) * 6.),
+                   (eggholder, np.ones(2) * 100.)],
+  )
   def test_minimize(self, maxiter, func_and_init):
     # Note, cannot compare step for step with scipy BFGS because our line search is _slightly_ different.
 
@@ -90,8 +90,12 @@ class TestBFGS(jtu.JaxTestCase):
       return result.x
 
     jax_res = min_op(x0)
-    scipy_res = scipy.optimize.minimize(func(np), x0, method='BFGS').x
-    self.assertAllClose(scipy_res, jax_res, atol=2e-5, check_dtypes=False)
+    # Newer scipy versions perform poorly in float32. See
+    # https://github.com/scipy/scipy/issues/19024.
+    x0_f64 = x0.astype('float64')
+    scipy_res = scipy.optimize.minimize(func(np), x0_f64, method='BFGS').x
+    self.assertAllClose(scipy_res, jax_res, atol=2e-4, rtol=2e-4,
+                        check_dtypes=False)
 
   def test_fixes4594(self):
     n = 2
@@ -104,7 +108,7 @@ class TestBFGS(jtu.JaxTestCase):
   @jtu.skip_on_flag('jax_enable_x64', False)
   def test_zakharov(self):
     def zakharov_fn(x):
-      ii = jnp.arange(1, len(x) + 1, step=1)
+      ii = jnp.arange(1, len(x) + 1, step=1, dtype=x.dtype)
       answer = zakharovFromIndices(x=x, ii=ii)
       return answer
 
@@ -113,6 +117,7 @@ class TestBFGS(jtu.JaxTestCase):
     jax_res = jax.scipy.optimize.minimize(fun=eval_func, x0=x0, method='BFGS')
     self.assertLess(jax_res.fun, 1e-6)
 
+  @jtu.ignore_warning(category=RuntimeWarning, message='divide by zero')
   def test_minimize_bad_initial_values(self):
     # This test runs deliberately "bad" initial values to test that handling
     # of failed line search, etc. is the same across implementations
@@ -142,14 +147,13 @@ class TestBFGS(jtu.JaxTestCase):
 
 class TestLBFGS(jtu.JaxTestCase):
 
-  @parameterized.named_parameters(jtu.cases_from_list(
-    {"testcase_name": "_func={}_maxiter={}".format(func_and_init[0].__name__, maxiter),
-     "maxiter": maxiter, "func_and_init": func_and_init}
-    for maxiter in [None]
-    for func_and_init in [(rosenbrock, np.zeros(2)),
-                          (himmelblau, np.zeros(2)),
-                          (matyas, np.ones(2) * 6.),
-                          (eggholder, np.ones(2) * 100.)]))
+  @jtu.sample_product(
+    maxiter=[None],
+    func_and_init=[(rosenbrock, np.zeros(2)),
+                   (himmelblau, np.zeros(2)),
+                   (matyas, np.ones(2) * 6.),
+                   (eggholder, np.ones(2) * 100.)],
+  )
   def test_minimize(self, maxiter, func_and_init):
 
     func, x0 = func_and_init
@@ -166,10 +170,13 @@ class TestLBFGS(jtu.JaxTestCase):
 
     jax_res = min_op(x0)
 
+    # Newer scipy versions perform poorly in float32. See
+    # https://github.com/scipy/scipy/issues/19024.
+    x0_f64 = x0.astype('float64')
     # Note that without bounds, L-BFGS-B is just L-BFGS
     with jtu.ignore_warning(category=DeprecationWarning,
                             message=".*tostring.*is deprecated.*"):
-      scipy_res = scipy.optimize.minimize(func(np), x0, method='L-BFGS-B').x
+      scipy_res = scipy.optimize.minimize(func(np), x0_f64, method='L-BFGS-B').x
 
     if func.__name__ == 'matyas':
       # scipy performs badly for Matyas, compare to true minimum instead
@@ -208,8 +215,8 @@ class TestLBFGS(jtu.JaxTestCase):
     complex_dim = 5
 
     f_re = rosenbrock(jnp)
-    init_re = jnp.zeros((2 * complex_dim,))
-    expect_re = jnp.ones((2 * complex_dim,))
+    init_re = jnp.zeros((2 * complex_dim,), dtype=complex)
+    expect_re = jnp.ones((2 * complex_dim,), dtype=complex)
 
     def f(z):
       x_re = jnp.concatenate([jnp.real(z), jnp.imag(z)])

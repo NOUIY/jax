@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2020 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,8 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """The Broyden-Fletcher-Goldfarb-Shanno minimization algorithm."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
 from functools import partial
-from typing import Callable, NamedTuple, Optional, Union
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -45,19 +49,19 @@ class _BFGSResults(NamedTuple):
     line_search_status: int describing line search end state (only means
       something if line search fails).
   """
-  converged: Union[bool, jnp.ndarray]
-  failed: Union[bool, jnp.ndarray]
-  k: Union[int, jnp.ndarray]
-  nfev: Union[int, jnp.ndarray]
-  ngev: Union[int, jnp.ndarray]
-  nhev: Union[int, jnp.ndarray]
-  x_k: jnp.ndarray
-  f_k: jnp.ndarray
-  g_k: jnp.ndarray
-  H_k: jnp.ndarray
-  old_old_fval: jnp.ndarray
-  status: Union[int, jnp.ndarray]
-  line_search_status: Union[int, jnp.ndarray]
+  converged: bool | jax.Array
+  failed: bool | jax.Array
+  k: int | jax.Array
+  nfev: int | jax.Array
+  ngev: int | jax.Array
+  nhev: int | jax.Array
+  x_k: jax.Array
+  f_k: jax.Array
+  g_k: jax.Array
+  H_k: jax.Array
+  old_old_fval: jax.Array
+  status: int | jax.Array
+  line_search_status: int | jax.Array
 
 
 _dot = partial(jnp.dot, precision=lax.Precision.HIGHEST)
@@ -66,8 +70,8 @@ _einsum = partial(jnp.einsum, precision=lax.Precision.HIGHEST)
 
 def minimize_bfgs(
     fun: Callable,
-    x0: jnp.ndarray,
-    maxiter: Optional[int] = None,
+    x0: jax.Array,
+    maxiter: int | None = None,
     norm=jnp.inf,
     gtol: float = 1e-5,
     line_search_maxiter: int = 10,
@@ -144,7 +148,7 @@ def minimize_bfgs(
     rho_k = jnp.reciprocal(_dot(y_k, s_k))
 
     sy_k = s_k[:, jnp.newaxis] * y_k[jnp.newaxis, :]
-    w = jnp.eye(d) - rho_k * sy_k
+    w = jnp.eye(d, dtype=rho_k.dtype) - rho_k * sy_k
     H_kp1 = (_einsum('ij,jk,lk', w, state.H_k, w)
              + rho_k * s_k[:, jnp.newaxis] * s_k[jnp.newaxis, :])
     H_kp1 = jnp.where(jnp.isfinite(rho_k), H_kp1, state.H_k)

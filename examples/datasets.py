@@ -1,4 +1,4 @@
-# Copyright 2018 Google LLC
+# Copyright 2018 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -35,7 +35,7 @@ def _download(url, filename):
   out_file = path.join(_DATA, filename)
   if not path.isfile(out_file):
     urllib.request.urlretrieve(url, out_file)
-    print("downloaded {} to {}".format(url, _DATA))
+    print(f"downloaded {url} to {_DATA}")
 
 
 def _partial_flatten(x):

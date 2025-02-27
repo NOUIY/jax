@@ -1,4 +1,4 @@
-# Copyright 2021 Google LLC
+# Copyright 2021 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,11 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# flake8: noqa: F401
 from jax._src.ad_checkpoint import (
-  checkpoint,
-  checkpoint_policies,
-  checkpoint_name,
-  print_saved_residuals,
-  remat,
+  checkpoint as checkpoint,
+  checkpoint_policies as checkpoint_policies,
+  checkpoint_name as checkpoint_name,
+  print_saved_residuals as print_saved_residuals,
+  remat as remat,
+)
+from jax._src.interpreters.partial_eval import (
+  Recompute as Recompute,
+  Saveable as Saveable,
+  Offloadable as Offloadable,
 )

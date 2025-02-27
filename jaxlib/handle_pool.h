@@ -1,4 +1,4 @@
-/* Copyright 2019 Google LLC
+/* Copyright 2019 The JAX Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -77,7 +77,7 @@ class HandlePool {
 
   // Borrows a handle from the pool. If 'stream' is non-null, sets the stream
   // associated with the handle.
-  static absl::StatusOr<Handle> Borrow(StreamType stream = nullptr);
+  static absl::StatusOr<Handle> Borrow(StreamType stream);
 
  private:
   static HandlePool<HandleType, StreamType>* Instance();

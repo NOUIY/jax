@@ -1,7 +1,7 @@
 .. currentmodule:: jax.profiler
 
-jax.profiler module
-===================
+``jax.profiler`` module
+=======================
 
 .. automodule:: jax.profiler
 
@@ -34,13 +34,3 @@ profiling features.
 
   device_memory_profile
   save_device_memory_profile
-
-Deprecated functions
---------------------
-
-.. autosummary::
-  :toctree: _autosummary
-
-  trace_function
-  TraceContext
-  StepTraceContext

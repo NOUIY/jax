@@ -1,12 +1,12 @@
-JAX Frequently Asked Questions (FAQ)
-====================================
+Frequently asked questions (FAQ)
+================================
 
 .. comment RST primer for Sphinx: https://thomas-cokelaer.info/tutorials/sphinx/rest_syntax.html
 .. comment Some links referenced here. Use `JAX - The Sharp Bits`_ (underscore at the end) to reference
 
 .. _JAX - The Sharp Bits: https://jax.readthedocs.io/en/latest/notebooks/Common_Gotchas_in_JAX.html
 
-We are collecting here answers to frequently asked questions.
+We are collecting answers to frequently asked questions here.
 Contributions welcome!
 
 ``jit`` changes the behavior of my function
@@ -55,31 +55,52 @@ Additional reading:
 
 ``jit`` changes the exact numerics of outputs
 ---------------------------------------------
-Sometimes users are surprised by the fact that wrapping a function with `jit` can
-make its outputs slightly different. For example:
+Sometimes users are surprised by the fact that wrapping a function with :func:`jit`
+can change the function's outputs. For example:
 
 >>> from jax import jit
->>> def f(x, y):
-...   return x + y - x
->>> x = jnp.array(1.0)
->>> y = jnp.array(0.001)
->>> print(f(x, y))
-0.0010000467
+>>> import jax.numpy as jnp
+>>> def f(x):
+...   return jnp.log(jnp.sqrt(x))
+>>> x = jnp.pi
+>>> print(f(x))
+0.572365
 
->>> print(jit(f)(x, y))
-0.001
+>>> print(jit(f)(x))
+0.5723649
 
-This happens because of optimizations within the XLA compiler. During compilation,
-XLA will often re-arrange floating point operations to simplify the expression it
-computes. For example, consider the expression ``x + y - x`` above. In non-JIT
-op-by-op evaluation, this addition and subtraction both accumulate standard
-32-bit floating point arithmetic error, so the result is not exactly equal ``y``.
-By contrast, in JIT the XLA compiler recognizes that the ``x`` and ``-x`` cancel
-each other, and so it drops these terms and the return value is identically equal
-to ``y``.
+This slight difference in output comes from optimizations within the XLA compiler:
+during compilation, XLA will sometimes rearrange or elide certain operations to make
+the overall computation more efficient.
 
-In general, for this and other related reasons, it is to be expected that JIT-compiled
-code will produce slightly different outputs than its non-JIT compiled counterpart.
+In this case, XLA utilizes the properties of the logarithm to replace ``log(sqrt(x))``
+with ``0.5 * log(x)``, which is a mathematically identical expression that can be
+computed more efficiently than the original. The difference in output comes from
+the fact that floating point arithmetic is only a close approximation of real math,
+so different ways of computing the same expression may have subtly different results.
+
+Other times, XLA's optimizations may lead to even more drastic differences.
+Consider the following example:
+
+>>> def f(x):
+...   return jnp.log(jnp.exp(x))
+>>> x = 100.0
+>>> print(f(x))
+inf
+
+>>> print(jit(f)(x))
+100.0
+
+In non-JIT-compiled op-by-op mode, the result is ``inf`` because ``jnp.exp(x)``
+overflows and returns ``inf``. Under JIT, however, XLA recognizes that ``log`` is
+the inverse of ``exp``, and removes the operations from the compiled function,
+simply returning the input. In this case, JIT compilation produces a more accurate
+floating point approximation of the real result.
+
+Unfortunately the full list of XLA's algebraic simplifications is not well
+documented, but if you're familiar with C++ and curious about what types of
+optimizations the XLA compiler makes, you can see them in the source code:
+`algebraic_simplifier.cc`_.
 
 .. _faq-slow-compile:
 
@@ -95,7 +116,7 @@ code in JAX's internal representation, typically because it makes heavy use of
 Python control flow such as ``for`` loops. For a handful of loop iterations,
 Python is OK, but if you need *many* loop iterations, you should rewrite your
 code to make use of JAX's
-`structured control flow primitives <https://jax.readthedocs.io/en/latest/notebooks/Common_Gotchas_in_JAX.html#Structured-control-flow-primitives>`_
+`structured control flow primitives <https://jax.readthedocs.io/en/latest/control-flow.html#Structured-control-flow-primitives>`_
 (such as :func:`lax.scan`) or avoid wrapping the loop with ``jit`` (you can
 still use ``jit`` decorated functions *inside* the loop).
 
@@ -107,11 +128,199 @@ Sometimes it isn't obvious how to rewrite your code to avoid Python loops
 because your code makes use of many arrays with different shapes. The
 recommended solution in this case is to make use of functions like
 :func:`jax.numpy.where` to do your computation on padded arrays with fixed
-shape. The JAX team is exploring a "masking" transformation to make such code
-easier to write.
+shape.
 
 If your functions are slow to compile for another reason, please open an issue
 on GitHub.
+
+.. _faq-jit-class-methods:
+
+How to use ``jit`` with methods?
+--------------------------------
+Most examples of :func:`jax.jit` concern decorating stand-alone Python functions,
+but decorating a method within a class introduces some complication. For example,
+consider the following simple class, where we've used a standard :func:`~jax.jit`
+annotation on a method::
+
+    >>> import jax.numpy as jnp
+    >>> from jax import jit
+     
+    >>> class CustomClass:
+    ...   def __init__(self, x: jnp.ndarray, mul: bool):
+    ...     self.x = x
+    ...     self.mul = mul
+    ... 
+    ...   @jit  # <---- How to do this correctly?
+    ...   def calc(self, y):
+    ...     if self.mul:
+    ...       return self.x * y
+    ...     return y
+
+However, this approach will result in an error when you attempt to call this method::
+
+    >>> c = CustomClass(2, True)
+    >>> c.calc(3)  # doctest: +SKIP
+    ---------------------------------------------------------------------------
+    TypeError                                 Traceback (most recent call last)
+      File "<stdin>", line 1, in <module
+    TypeError: Argument '<CustomClass object at 0x7f7dd4125890>' of type <class 'CustomClass'> is not a valid JAX type.
+
+The problem is that the first argument to the function is ``self``, which has type
+``CustomClass``, and JAX does not know how to handle this type.
+There are three basic strategies we might use in this case, and we'll discuss
+them below.
+
+Strategy 1: JIT-compiled helper function
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The most straightforward approach is to create a helper function external to the class
+that can be JIT-decorated in the normal way. For example::
+
+    >>> from functools import partial
+    
+    >>> class CustomClass:
+    ...   def __init__(self, x: jnp.ndarray, mul: bool):
+    ...     self.x = x
+    ...     self.mul = mul
+    ... 
+    ...   def calc(self, y):
+    ...     return _calc(self.mul, self.x, y)
+    
+    >>> @partial(jit, static_argnums=0)
+    ... def _calc(mul, x, y):
+    ...   if mul:
+    ...     return x * y
+    ...   return y
+
+The result will work as expected::
+
+    >>> c = CustomClass(2, True)
+    >>> print(c.calc(3))
+    6
+
+The benefit of such an approach is that it is simple, explicit, and it avoids the need
+to teach JAX how to handle objects of type ``CustomClass``. However, you may wish to
+keep all the method logic in the same place.
+
+Strategy 2: Marking ``self`` as static
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Another common pattern is to use ``static_argnums`` to mark the ``self`` argument as static.
+But this must be done with care to avoid unexpected results.
+You may be tempted to simply do this::
+
+    >>> class CustomClass:
+    ...   def __init__(self, x: jnp.ndarray, mul: bool):
+    ...     self.x = x
+    ...     self.mul = mul
+    ...  
+    ...   # WARNING: this example is broken, as we'll see below. Don't copy & paste!
+    ...   @partial(jit, static_argnums=0)
+    ...   def calc(self, y):
+    ...     if self.mul:
+    ...       return self.x * y
+    ...     return y
+
+If you call the method, it will no longer raise an error::
+
+    >>> c = CustomClass(2, True)
+    >>> print(c.calc(3))
+    6
+
+However, there is a catch: if you mutate the object after the first method call, the
+subsequent method call may return an incorrect result::
+
+    >>> c.mul = False
+    >>> print(c.calc(3))  # Should print 3
+    6
+
+Why is this? When you mark an object as static, it will effectively be used as a dictionary
+key in JIT's internal compilation cache, meaning its hash (i.e. ``hash(obj)``) equality
+(i.e. ``obj1 == obj2``) and object identity (i.e. ``obj1 is obj2``) will be assumed to have
+consistent behavior. The default ``__hash__`` for a custom object is its object ID, and so
+JAX has no way of knowing that a mutated object should trigger a re-compilation.
+
+You can partially address this by defining an appropriate ``__hash__`` and ``__eq__`` methods
+for your object; for example::
+
+    >>> class CustomClass:
+    ...   def __init__(self, x: jnp.ndarray, mul: bool):
+    ...     self.x = x
+    ...     self.mul = mul
+    ... 
+    ...   @partial(jit, static_argnums=0)
+    ...   def calc(self, y):
+    ...     if self.mul:
+    ...       return self.x * y
+    ...     return y
+    ... 
+    ...   def __hash__(self):
+    ...     return hash((self.x, self.mul))
+    ... 
+    ...   def __eq__(self, other):
+    ...     return (isinstance(other, CustomClass) and
+    ...             (self.x, self.mul) == (other.x, other.mul))
+
+(see the :meth:`object.__hash__` documentation for more discussion of the requirements
+when overriding ``__hash__``).
+
+This should work correctly with JIT and other transforms **so long as you never mutate
+your object**. Mutations of objects used as hash keys lead to several subtle problems,
+which is why for example mutable Python containers (e.g. :class:`dict`, :class:`list`)
+don't define ``__hash__``, while their immutable counterparts (e.g. :class:`tuple`) do.
+
+If your class relies on in-place mutations (such as setting ``self.attr = ...`` within its
+methods), then your object is not really "static" and marking it as such may lead to problems.
+Fortunately, there's another option for this case.
+
+Strategy 3: Making ``CustomClass`` a PyTree
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The most flexible approach to correctly JIT-compiling a class method is to register the
+type as a custom PyTree object; see :ref:`extending-pytrees`. This lets you specify
+exactly which components of the class should be treated as static and which should be
+treated as dynamic. Here's how it might look::
+
+    >>> class CustomClass:
+    ...   def __init__(self, x: jnp.ndarray, mul: bool):
+    ...     self.x = x
+    ...     self.mul = mul
+    ... 
+    ...   @jit
+    ...   def calc(self, y):
+    ...     if self.mul:
+    ...       return self.x * y
+    ...     return y
+    ... 
+    ...   def _tree_flatten(self):
+    ...     children = (self.x,)  # arrays / dynamic values
+    ...     aux_data = {'mul': self.mul}  # static values
+    ...     return (children, aux_data)
+    ...
+    ...   @classmethod
+    ...   def _tree_unflatten(cls, aux_data, children):
+    ...     return cls(*children, **aux_data)
+    
+    >>> from jax import tree_util
+    >>> tree_util.register_pytree_node(CustomClass,
+    ...                                CustomClass._tree_flatten,
+    ...                                CustomClass._tree_unflatten)
+
+This is certainly more involved, but it solves all the issues associated with the simpler
+approaches used above::
+
+    >>> c = CustomClass(2, True)
+    >>> print(c.calc(3))
+    6
+
+    >>> c.mul = False  # mutation is detected
+    >>> print(c.calc(3))
+    3
+
+    >>> c = CustomClass(jnp.array(2), True)  # non-hashable x is supported
+    >>> print(c.calc(3))
+    6
+
+So long as your ``tree_flatten`` and ``tree_unflatten`` functions correctly handle all
+relevant attributes in the class, you should be able to use objects of this type directly
+as arguments to JIT-compiled functions, without any special annotations.
 
 .. _faq-data-placement:
 
@@ -122,18 +331,21 @@ Let's first look at the principles of data and computation placement in JAX.
 
 In JAX, the computation follows data placement. JAX arrays
 have two placement properties: 1) the device where the data resides;
-and 2) whether it is **committed** to the device or not (the data is sometimes 
+and 2) whether it is **committed** to the device or not (the data is sometimes
 referred to as being *sticky* to the device).
 
 By default, JAX arrays are placed uncommitted on the default device
-(``jax.devices()[0]``), which is the first GPU by default. If no GPU is 
-present, ``jax.devices()[0]`` is the first CPU. The default device can 
-be set to "cpu" or "gpu" manually by setting the environment variable 
-``JAX_PLATFORM_NAME`` or the absl flag ``--jax_platform_name``.
+(``jax.devices()[0]``), which is the first GPU or TPU by default. If no GPU or
+TPU is present, ``jax.devices()[0]`` is the CPU. The default device can
+be temporarily overridden with the :func:`jax.default_device` context manager, or
+set for the whole process by setting the environment variable ``JAX_PLATFORMS``
+or the absl flag ``--jax_platforms`` to "cpu", "gpu", or "tpu"
+(``JAX_PLATFORMS`` can also be a list of platforms, which determines which
+platforms are available in priority order).
 
 >>> from jax import numpy as jnp
->>> print(jnp.ones(3).device_buffer.device())  # doctest: +SKIP
-gpu:0
+>>> print(jnp.ones(3).devices())  # doctest: +SKIP
+{CudaDevice(id=0)}
 
 Computations involving uncommitted data are performed on the default
 device and the results are uncommitted on the default device.
@@ -143,41 +355,44 @@ with a ``device`` parameter, in which case the data becomes **committed** to the
 
 >>> import jax
 >>> from jax import device_put
->>> print(device_put(1, jax.devices()[2]).device_buffer.device())  # doctest: +SKIP
-gpu:2
+>>> arr = device_put(1, jax.devices()[2])  # doctest: +SKIP
+>>> print(arr.devices())  # doctest: +SKIP
+{CudaDevice(id=2)}
 
 Computations involving some committed inputs will happen on the
 committed device and the result will be committed on the
-same device. Invoking an operation on arguments that are committed 
+same device. Invoking an operation on arguments that are committed
 to more than one device will raise an error.
 
-You can also use :func:`jax.device_put` without a ``device`` parameter. If the data 
-is already on a device (committed or not), it's left as-is. If the data isn't on any 
-device—that is, it's a regular Python or NumPy value—it's placed uncommitted on the default 
+You can also use :func:`jax.device_put` without a ``device`` parameter. If the data
+is already on a device (committed or not), it's left as-is. If the data isn't on any
+device—that is, it's a regular Python or NumPy value—it's placed uncommitted on the default
 device.
 
-Jitted functions behave like any other primitive operations—they will follow the 
+Jitted functions behave like any other primitive operations—they will follow the
 data and will show errors if invoked on data committed on more than one device.
 
-``jnp.device_put(jnp.zeros(...), jax.devices()[1])`` or similar will actually create the
-array of zeros on ``jax.devices()[1]``, instead of creating the array on the default
-device then moving it. This is thanks to some laziness in array creation, which holds
-for all the constant creation operations (``ones``, ``full``, ``eye``, etc).
+(Before `PR #6002 <https://github.com/jax-ml/jax/pull/6002>`_ in March 2021
+there was some laziness in creation of array constants, so that
+``jax.device_put(jnp.zeros(...), jax.devices()[1])`` or similar would actually
+create the array of zeros on ``jax.devices()[1]``, instead of creating the
+array on the default device then moving it. But this optimization was removed
+so as to simplify the implementation.)
 
-(As of April 2020, :func:`jax.jit` has a `device` parameter that affects the device 
-placement. That parameter is experimental, is likely to be removed or changed, 
+(As of April 2020, :func:`jax.jit` has a `device` parameter that affects the device
+placement. That parameter is experimental, is likely to be removed or changed,
 and its use is not recommended.)
 
 For a worked-out example, we recommend reading through
 ``test_computation_follows_data`` in
-`multi_device_test.py <https://github.com/google/jax/blob/main/tests/multi_device_test.py>`_.
+`multi_device_test.py <https://github.com/jax-ml/jax/blob/main/tests/multi_device_test.py>`_.
 
 .. _faq-benchmark:
 
 Benchmarking JAX code
 ---------------------
 
-You just ported a tricky function from NumPy/SciPy to JAX. Did that actuallly
+You just ported a tricky function from NumPy/SciPy to JAX. Did that actually
 speed things up?
 
 Keep in mind these important differences from NumPy when measuring the
@@ -185,7 +400,7 @@ speed of code using JAX:
 
 1. **JAX code is Just-In-Time (JIT) compiled.** Most code written in JAX can be
    written in such a way that it supports JIT compilation, which can make it run
-   *much faster* (see `To JIT or not to JIT`_). To get maximium performance from
+   *much faster* (see `To JIT or not to JIT`_). To get maximum performance from
    JAX, you should apply :func:`jax.jit` on your outer-most function calls.
 
    Keep in mind that the first time you run JAX code, it will be slower because
@@ -198,7 +413,7 @@ speed of code using JAX:
    use 32-bit dtypes in NumPy or enable 64-bit dtypes in JAX (see
    `Double (64 bit) precision`_) for a fair comparison.
 4. **Transferring data between CPUs and accelerators takes time.** If you only
-   want to measure the how long it takes to evaluate a function, you may want to
+   want to measure how long it takes to evaluate a function, you may want to
    transfer data to the device on which you want to run it first (see
    :ref:`faq-data-placement`).
 
@@ -228,7 +443,7 @@ When run with a GPU in Colab_, we see:
 - JAX takes 193 ms to compile the function
 - JAX takes 485 µs per evaluation on the GPU
 
-In this case, we see that once the data is transfered and the function is
+In this case, we see that once the data is transferred and the function is
 compiled, JAX on the GPU is about 30x faster for repeated evaluations.
 
 Is this a fair comparison? Maybe. The performance that ultimately matters is for
@@ -259,7 +474,7 @@ Broadly speaking:
   they are dispatched asynchronously (see :ref:`async-dispatch`); and they can
   be executed on CPU, GPU, or TPU, each of which have vastly different and continuously
   evolving performance characteristics.
-  
+
 These architectural differences make meaningful direct benchmark comparisons between
 NumPy and JAX difficult.
 
@@ -332,22 +547,22 @@ of how often it arises in control flow.
 
 Here is how the transformations introduce abstract or concrete tracers:
 
-  * :func:`jax.jit`: introduces **abstract tracers** for all positional arguments
-    except those denoted by ``static_argnums``, which remain regular
-    values.
-  * :func:`jax.pmap`: introduces **abstract tracers** for all positional arguments
-    except those denoted by ``static_broadcasted_argnums``.
-  * :func:`jax.vmap`, :func:`jax.make_jaxpr`, :func:`xla_computation`:
-    introduce **abstract tracers** for all positional arguments.
-  * :func:`jax.jvp` and :func:`jax.grad` introduce **concrete tracers**
-    for all positional arguments. An exception is when these transformations
-    are within an outer transformation and the actual arguments are
-    themselves abstract tracers; in that case, the tracers introduced
-    by the autodiff transformations are also abstract tracers.
-  * All higher-order control-flow primitives (:func:`lax.cond`, :func:`lax.while_loop`,
-    :func:`lax.fori_loop`, :func:`lax.scan`) when they process the functionals
-    introduce **abstract tracers**, whether or not there is a JAX transformation
-    in progress.
+* :func:`jax.jit`: introduces **abstract tracers** for all positional arguments
+  except those denoted by ``static_argnums``, which remain regular
+  values.
+* :func:`jax.pmap`: introduces **abstract tracers** for all positional arguments
+  except those denoted by ``static_broadcasted_argnums``.
+* :func:`jax.vmap`, :func:`jax.make_jaxpr`, :func:`xla_computation`:
+  introduce **abstract tracers** for all positional arguments.
+* :func:`jax.jvp` and :func:`jax.grad` introduce **concrete tracers**
+  for all positional arguments. An exception is when these transformations
+  are within an outer transformation and the actual arguments are
+  themselves abstract tracers; in that case, the tracers introduced
+  by the autodiff transformations are also abstract tracers.
+* All higher-order control-flow primitives (:func:`lax.cond`, :func:`lax.while_loop`,
+  :func:`lax.fori_loop`, :func:`lax.scan`) when they process the functionals
+  introduce **abstract tracers**, whether or not there is a JAX transformation
+  in progress.
 
 All of this is relevant when you have code that can operate
 only on regular Python values, such as code that has conditional
@@ -371,20 +586,28 @@ value of ``y``.
 Buffer donation
 ---------------
 
-(This feature is implemented only for TPU and GPU.)
-
-When JAX executes a computation it reserves buffers on the device for all inputs and outputs.
-If you know than one of the inputs is not needed after the computation, and if it
+When JAX executes a computation it uses buffers on the device for all inputs and outputs.
+If you know that one of the inputs is not needed after the computation, and if it
 matches the shape and element type of one of the outputs, you can specify that you
 want the corresponding input buffer to be donated to hold an output. This will reduce
 the memory required for the execution by the size of the donated buffer.
+
+If you have something like the following pattern, you can use buffer donation::
+
+   params, state = jax.pmap(update_fn, donate_argnums=(0, 1))(params, state)
+
+You can think of this as a way to do a memory-efficient functional update
+on your immutable JAX arrays. Within the boundaries of a computation XLA can
+make this optimization for you, but at the jit/pmap boundary you need to
+guarantee to XLA that you will not use the donated input buffer after calling
+the donating function.
 
 You achieve this by using the `donate_argnums` parameter to the functions :func:`jax.jit`,
 :func:`jax.pjit`, and :func:`jax.pmap`. This parameter is a sequence of indices (0 based) into
 the positional argument list::
 
-    def add(x, y):
-      return x + y
+   def add(x, y):
+     return x + y
 
    x = jax.device_put(np.ones((2, 3)))
    y = jax.device_put(np.ones((2, 3)))
@@ -392,13 +615,18 @@ the positional argument list::
    # the same shape and type as `y`, so it will share its buffer.
    z = jax.jit(add, donate_argnums=(1,))(x, y)
 
+Note that this currently does not work when calling your function with key-word arguments!
+The following code will not donate any buffers::
+
+   params, state = jax.pmap(update_fn, donate_argnums=(0, 1))(params=params, state=state)
+
 If an argument whose buffer is donated is a pytree, then all the buffers
 for its components are donated::
 
-    def add_ones(xs: List[Array]):
-      return [x + 1 for x in xs]
+   def add_ones(xs: List[Array]):
+     return [x + 1 for x in xs]
 
-   xs = [jax.device_put(np.ones((2, 3)), jax.device_put(np.ones((3, 4))]
+   xs = [jax.device_put(np.ones((2, 3))), jax.device_put(np.ones((3, 4)))]
    # Execute `add_ones` with donation of all the buffers for `xs`.
    # The outputs have the same shape and type as the elements of `xs`,
    # so they will share those buffers.
@@ -430,9 +658,6 @@ the donation::
    z = jax.jit(add, donate_argnums=(1,))(x, y)
    # >> UserWarning: Some donated buffers were not usable: f32[1,3]{1,0}
 
-Buffer donation is implemented for GPU and TPU. You will get the above warning
-anytime you try to use donation on CPU.
-
 Gradients contain `NaN` where using ``where``
 ------------------------------------------------
 
@@ -461,20 +686,167 @@ The inner ``jnp.where`` may be needed in addition to the original one, e.g.::
 
   def my_log_or_y(x, y):
     """Return log(x) if x > 0 or y"""
-    return jnp.where(x > 0., jnp.log(jnp.where(x > 0., x, 1.), y)
+    return jnp.where(x > 0., jnp.log(jnp.where(x > 0., x, 1.)), y)
 
 
 Additional reading:
 
-  * `Issue: gradients through jnp.where when one of branches is nan <https://github.com/google/jax/issues/1052#issuecomment-514083352>`_.
+  * `Issue: gradients through jnp.where when one of branches is nan <https://github.com/jax-ml/jax/issues/1052#issuecomment-514083352>`_.
   * `How to avoid NaN gradients when using where <https://github.com/tensorflow/probability/blob/master/discussion/where-nan.pdf>`_.
 
 
-Additional Sections
--------------------
+Why are gradients zero for functions based on sort order?
+---------------------------------------------------------
 
-.. comment We refer to the anchor below in JAX error messages
+If you define a function that processes the input using operations that depend on
+the relative ordering of inputs (e.g. ``max``, ``greater``, ``argsort``, etc.) then
+you may be surprised to find that the gradient is everywhere zero.
+Here is an example, where we define `f(x)` to be a step function that returns
+`0` when `x` is negative, and `1` when `x` is positive::
 
-``Abstract tracer value encountered where concrete value is expected`` error
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-See :class:`jax.errors.ConcretizationTypeError`
+  import jax
+  import numpy as np
+  import jax.numpy as jnp
+
+  def f(x):
+    return (x > 0).astype(float)
+
+  df = jax.vmap(jax.grad(f))
+
+  x = jnp.array([-1.0, -0.5, 0.0, 0.5, 1.0])
+
+  print(f"f(x)  = {f(x)}")
+  # f(x)  = [0. 0. 0. 1. 1.]
+
+  print(f"df(x) = {df(x)}")
+  # df(x) = [0. 0. 0. 0. 0.]
+
+The fact that the gradient is everywhere zero may be confusing at first glance:
+after all, the output does change in response to the input, so how can the gradient
+be zero? However, zero turns out to be the correct result in this case.
+
+Why is this? Remember that what differentiation is measuring the change in ``f``
+given an infinitesimal change in ``x``. For ``x=1.0``, ``f`` returns ``1.0``.
+If we perturb ``x`` to make it slightly larger or smaller, this does not change
+the output, so by definition, :code:`grad(f)(1.0)` should be zero.
+This same logic holds for all values of ``f`` greater than zero: infinitesimally
+perturbing the input does not change the output, so the gradient is zero.
+Similarly, for all values of ``x`` less than zero, the output is zero.
+Perturbing ``x`` does not change this output, so the gradient is zero.
+That leaves us with the tricky case of ``x=0``. Surely, if you perturb ``x`` upward,
+it will change the output, but this is problematic: an infinitesimal change in ``x``
+produces a finite change in the function value, which implies the gradient is
+undefined.
+Fortunately, there's another way for us to measure the gradient in this case: we
+perturb the function downward, in which case the output does not change, and so the
+gradient is zero.
+JAX and other autodiff systems tend to handle discontinuities in this way: if the
+positive gradient and negative gradient disagree, but one is defined and the other is
+not, we use the one that is defined.
+Under this definition of the gradient, mathematically and numerically the gradient of
+this function is everywhere zero.
+
+The problem stems from the fact that our function has a discontinuity at ``x = 0``.
+Our ``f`` here is essentially a `Heaviside Step Function`_, and we can use a
+`Sigmoid Function`_ as a smoothed replacement.
+The sigmoid is approximately equal to the heaviside function when `x` is far from zero,
+but replaces the discontinuity at ``x = 0`` with a smooth, differentiable curve.
+As a result of using :func:`jax.nn.sigmoid`, we get a similar computation with
+well-defined gradients::
+
+  def g(x):
+    return jax.nn.sigmoid(x)
+
+  dg = jax.vmap(jax.grad(g))
+
+  x = jnp.array([-10.0, -1.0, 0.0, 1.0, 10.0])
+
+  with np.printoptions(suppress=True, precision=2):
+    print(f"g(x)  = {g(x)}")
+    # g(x)  = [0.   0.27 0.5  0.73 1.  ]
+
+    print(f"dg(x) = {dg(x)}")
+    # dg(x) = [0.   0.2  0.25 0.2  0.  ]
+
+The :mod:`jax.nn` submodule also has smooth versions of other common rank-based
+functions, for example :func:`jax.nn.softmax` can replace uses of
+:func:`jax.numpy.argmax`, :func:`jax.nn.soft_sign` can replace uses of
+:func:`jax.numpy.sign`, :func:`jax.nn.softplus` or :func:`jax.nn.squareplus`
+can replace uses of :func:`jax.nn.relu`, etc.
+
+How can I convert a JAX Tracer to a NumPy array?
+------------------------------------------------
+When inspecting a transformed JAX function at runtime, you'll find that array
+values are replaced by :class:`~jax.core.Tracer` objects::
+
+  @jax.jit
+  def f(x):
+    print(type(x))
+    return x
+
+  f(jnp.arange(5))
+
+This prints the following::
+
+  <class 'jax.interpreters.partial_eval.DynamicJaxprTracer'>
+
+A frequent question is how such a tracer can be converted back to a normal NumPy
+array. In short, **it is impossible to convert a Tracer to a NumPy array**, because
+a tracer is an abstract representation of *every possible* value with a given shape
+and dtype, while a numpy array is a concrete member of that abstract class.
+For more discussion of how tracers work within the context of JAX transformations,
+see `JIT mechanics`_.
+
+The question of converting Tracers back to arrays usually comes up within
+the context of another goal, related to accessing intermediate values in a
+computation at runtime. For example:
+
+- If you wish to print a traced value at runtime for debugging purposes, you might
+  consider using :func:`jax.debug.print`.
+- If you wish to call non-JAX code within a transformed JAX function, you might
+  consider using :func:`jax.pure_callback`, an example of which is available at
+  `Pure callback example`_.
+- If you wish to input or output array buffers at runtime (for example, load data
+  from file, or log the contents of the array to disk), you might consider using
+  :func:`jax.experimental.io_callback`, an example of which can be found at
+  `IO callback example`_.
+
+For more information on runtime callbacks and examples of their use,
+see `External callbacks in JAX`_.
+
+Why do some CUDA libraries fail to load/initialize?
+---------------------------------------------------
+
+When resolving dynamic libraries, JAX uses the usual `dynamic linker search pattern`_.
+JAX sets :code:`RPATH` to point to the JAX-relative location of the
+pip-installed NVIDIA CUDA packages, preferring them if installed. If :code:`ld.so`
+cannot find your CUDA runtime libraries along its usual search path, then you
+must include the paths to those libraries explicitly in :code:`LD_LIBRARY_PATH`.
+The easiest way to ensure your CUDA files are discoverable is to simply install
+the :code:`nvidia-*-cu12` pip packages, which are included in the standard
+:code:`jax[cuda_12]` install option.
+
+Occasionally, even when you have ensured that your runtime libraries are discoverable,
+there may still be some issues with loading or initializing them. A common cause of
+such issues is simply having insufficient memory for CUDA library initialization at
+runtime. This sometimes occurs because JAX will pre-allocate too large of a chunk of
+currently available device memory for faster execution, occasionally resulting in
+insufficient memory being left available for runtime CUDA library initialization. 
+
+This is especially likely when running multiple JAX instances, running JAX in
+tandem with TensorFlow which performs its own pre-allocation, or when running
+JAX on a system where the GPU is being heavily utilized by other processes. When
+in doubt, try running the program again with reduced pre-allocation, either by
+reducing :code:`XLA_PYTHON_CLIENT_MEM_FRACTION` from the default of :code:`.75`,
+or setting :code:`XLA_PYTHON_CLIENT_PREALLOCATE=false`. For more details, please
+see the page on `JAX GPU memory allocation`_.
+
+.. _JIT mechanics: https://jax.readthedocs.io/en/latest/notebooks/thinking_in_jax.html#jit-mechanics-tracing-and-static-variables
+.. _External callbacks in JAX: https://jax.readthedocs.io/en/latest/notebooks/external_callbacks.html
+.. _Pure callback example: https://jax.readthedocs.io/en/latest/notebooks/external_callbacks.html#example-pure-callback-with-custom-jvp
+.. _IO callback example: https://jax.readthedocs.io/en/latest/notebooks/external_callbacks.html#exploring-jax-experimental-io-callback
+.. _Heaviside Step Function: https://en.wikipedia.org/wiki/Heaviside_step_function
+.. _Sigmoid Function: https://en.wikipedia.org/wiki/Sigmoid_function
+.. _algebraic_simplifier.cc: https://github.com/openxla/xla/blob/33f815e190982dac4f20d1f35adb98497a382377/xla/hlo/transforms/simplifiers/algebraic_simplifier.cc#L4851
+.. _JAX GPU memory allocation: https://jax.readthedocs.io/en/latest/gpu_memory_allocation.html
+.. _dynamic linker search pattern: https://man7.org/linux/man-pages/man8/ld.so.8.html

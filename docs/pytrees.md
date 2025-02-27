@@ -16,6 +16,8 @@ language_info:
 
 # Pytrees
 
+<!--* freshness: { reviewed: '2024-03-13' } *-->
+
 ## What is a pytree?
 
 In JAX, we use the term *pytree* to refer to a tree-like structure built out of
@@ -150,15 +152,15 @@ value_structured = [1., (2., 3.)]
 
 # The leaves in value_flat correspond to the `*` markers in value_tree
 value_flat, value_tree = tree_flatten(value_structured)
-print("value_flat={}\nvalue_tree={}".format(value_flat, value_tree))
+print(f"{value_flat=}\n{value_tree=}")
 
 # Transform the flat value list using an element-wise numeric transformer
 transformed_flat = list(map(lambda v: v * 2., value_flat))
-print("transformed_flat={}".format(transformed_flat))
+print(f"{transformed_flat=}")
 
 # Reconstruct the structured output, using the original
 transformed_structured = tree_unflatten(value_tree, transformed_flat)
-print("transformed_structured={}".format(transformed_structured))
+print(f"{transformed_structured=}")
 ```
 
 By default, pytree containers can be lists, tuples, dicts, namedtuple, None,
@@ -180,8 +182,7 @@ example_containers = [
 def show_example(structured):
   flat, tree = tree_flatten(structured)
   unflattened = tree_unflatten(tree, flat)
-  print("structured={}\n  flat={}\n  tree={}\n  unflattened={}".format(
-      structured, flat, tree, unflattened))
+  print(f"{structured=}\n  {flat=}\n  {tree=}\n  {unflattened=}")
 
 for structured in example_containers:
   show_example(structured)
@@ -281,8 +282,57 @@ class RegisteredSpecial2(Special):
 show_example(RegisteredSpecial2(1., 2.))
 ```
 
-JAX sometimes needs to compare `treedef` for equality. Therefore, care must be
-taken to ensure that the auxiliary data specified in the flattening recipe
-supports a meaningful equality comparison.
+When defining unflattening functions, in general `children` should contain all the
+dynamic elements of the data structure (arrays, dynamic scalars, and pytrees), while
+`aux_data` should contain all the static elements that will be rolled into the `treedef`
+structure. JAX sometimes needs to compare `treedef` for equality, or compute its hash
+for use in the JIT cache, and so care must be taken to ensure that the auxiliary data
+specified in the flattening recipe supports meaningful hashing and equality comparisons.
 
 The whole set of functions for operating on pytrees are in {mod}`jax.tree_util`.
+
+### Custom PyTrees and Initialization
+
+One common gotcha with user-defined PyTree objects is that JAX transformations occasionally
+initialize them with unexpected values, so that any input validation done at initialization
+may fail. For example:
+
+```{code-cell}
+:tags: [skip-execution]
+class MyTree:
+  def __init__(self, a):
+    self.a = jnp.asarray(a)
+
+register_pytree_node(MyTree, lambda tree: ((tree.a,), None),
+    lambda _, args: MyTree(*args))
+
+tree = MyTree(jnp.arange(5.0))
+
+jax.vmap(lambda x: x)(tree)      # Error because object() is passed to MyTree.
+jax.jacobian(lambda x: x)(tree)  # Error because MyTree(...) is passed to MyTree
+```
+In the first case, JAX's internals use arrays of `object()` values to infer the structure
+of the tree; in the second case, the jacobian of a function mapping a tree to a tree
+is defined as a tree of trees.
+
+For this reason, the `__init__` and `__new__` methods of custom PyTree classes should
+generally avoid doing any array conversion or other input validation, or else
+anticipate and handle these special cases. For example:
+```{code-cell}
+class MyTree:
+  def __init__(self, a):
+    if not (type(a) is object or a is None or isinstance(a, MyTree)):
+      a = jnp.asarray(a)
+    self.a = a
+```
+Another possibility is to structure your `tree_unflatten` function so that it avoids
+calling `__init__`; for example:
+```{code-cell}
+def tree_unflatten(aux_data, children):
+  del aux_data  # unused in this class
+  obj = object.__new__(MyTree)
+  obj.a = a
+  return obj
+```
+If you go this route, make sure that your `tree_unflatten` function stays in-sync with 
+`__init__` if and when the code is updated.

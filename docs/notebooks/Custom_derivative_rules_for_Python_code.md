@@ -5,7 +5,7 @@ jupytext:
     extension: .md
     format_name: myst
     format_version: 0.13
-    jupytext_version: 1.13.6
+    jupytext_version: 1.16.4
 kernelspec:
   display_name: Python 3
   name: python3
@@ -13,11 +13,11 @@ kernelspec:
 
 +++ {"id": "LqiaKasFjH82"}
 
-# Custom derivative rules for JAX-transformable Python functions
+# Custom derivative rules
 
-[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/google/jax/blob/main/docs/notebooks/Custom_derivative_rules_for_Python_code.ipynb)
+<!--* freshness: { reviewed: '2024-04-08' } *-->
 
-*mattjj@ Mar 19 2020, last updated Oct 14 2020*
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/jax-ml/jax/blob/main/docs/notebooks/Custom_derivative_rules_for_Python_code.ipynb) [![Open in Kaggle](https://kaggle.com/static/images/open-in-kaggle.svg)](https://kaggle.com/kernels/welcome?src=https://github.com/jax-ml/jax/blob/main/docs/notebooks/Custom_derivative_rules_for_Python_code.ipynb)
 
 There are two ways to define differentiation rules in JAX:
 
@@ -30,7 +30,7 @@ For an introduction to JAX's automatic differentiation API, see [The Autodiff Co
 
 +++ {"id": "9Fg3NFNY-2RY"}
 
-## TL;DR
+## Summary
 
 +++ {"id": "ZgMNRtXyWIW8"}
 
@@ -106,7 +106,7 @@ def f(x, y):
   return jnp.sin(x) * y
 
 def f_fwd(x, y):
-# Returns primal output and residuals to be used in backward pass by f_bwd.
+  # Returns primal output and residuals to be used in backward pass by f_bwd.
   return f(x, y), (jnp.cos(x), jnp.sin(x), y)
 
 def f_bwd(res, g):
@@ -127,7 +127,7 @@ print(grad(f)(2., 3.))
 
 ## Example problems
 
-To get an idea of what problems `jax.custom_jvp` and `jax.custom_vjp` are meant to solve, let's go over a few examples. A more thorough introduction to the `jax.custom_jvp` and `jax.custom_vjp` APIs is in [the next section](#scrollTo=Dr0aNkBslfQf).
+To get an idea of what problems `jax.custom_jvp` and `jax.custom_vjp` are meant to solve, let's go over a few examples. A more thorough introduction to the `jax.custom_jvp` and `jax.custom_vjp` APIs is in the next section.
 
 +++ {"id": "AR02eyd1GQhC"}
 
@@ -143,7 +143,6 @@ Say we want to write a function called `log1pexp`, which computes $x \mapsto \lo
 :id: 6lWbTvs40ET-
 :outputId: 8caff99e-add1-4c70-ace3-212c0c5c6f4e
 
-import jax.numpy as jnp
 
 def log1pexp(x):
   return jnp.log(1. + jnp.exp(x))
@@ -270,7 +269,7 @@ A related application is to enforce a differentiation convention, perhaps at a b
 
 +++ {"id": "l_6tdb-QGK-H"}
 
-Consider the function $f : \mathbb{R}_+ \mapsto \mathbb{R}_+$ with $f(x) = \frac{x}{1 + \sqrt{x}}$, where we take $\mathbb{R}_+ = [0, \infty)$. We might implement $f$ as a program like this:
+Consider the function $f : \mathbb{R}_+ \to \mathbb{R}_+$ with $f(x) = \frac{x}{1 + \sqrt{x}}$, where we take $\mathbb{R}_+ = [0, \infty)$. We might implement $f$ as a program like this:
 
 ```{code-cell} ipython3
 :id: AfF5P7x_GaSe
@@ -522,7 +521,7 @@ def fixed_point_rev(f, res, x_star_bar):
                              (a, x_star, x_star_bar),
                              x_star_bar))
   return a_bar, jnp.zeros_like(x_star)
-  
+
 def rev_iter(f, packed, u):
   a, x_star, x_star_bar = packed
   _, vjp_x = vjp(lambda x: f(a, x), x_star)
@@ -570,7 +569,8 @@ A limitation to this approach is that the argument `f` can't close over any valu
 
 ### Use `jax.custom_jvp` to define forward-mode (and, indirectly, reverse-mode) rules
 
-Here's a canonical basic example of using `jax.custom_jvp`:
+Here's a canonical basic example of using `jax.custom_jvp`, where the comments use
+[Haskell-like type signatures](https://wiki.haskell.org/Type_signature):
 
 ```{code-cell} ipython3
 :id: nVkhbIFAOGZk
@@ -905,7 +905,7 @@ def f_fwd(x, y):
 
 def f_bwd(res, g):
   cos_x, sin_x, y = res
-  return (cos_x * g * y, -sin_x * g)
+  return (cos_x * g * y, sin_x * g)
 
 f.defvjp(f_fwd, f_bwd)
 ```
@@ -962,7 +962,6 @@ print(grad(f)(3.))
 :id: s1Pn_qCIODcF
 :outputId: 423d34e0-35b8-4b57-e89d-f70f20e28ea9
 
-from jax import vjp
 
 y, f_vjp = vjp(f, 3.)
 print(y)
@@ -1012,7 +1011,7 @@ def debug_fwd(x):
   return x, x
 
 def debug_bwd(x, g):
-  import pdb; pdb.set_trace()
+  pdb.set_trace()
   return g
 
 debug.defvjp(debug_fwd, debug_bwd)
@@ -1035,9 +1034,9 @@ jax.grad(foo)(3.)
 > <ipython-input-113-b19a2dc1abf7>(12)debug_bwd()
 -> return g
 (Pdb) p x
-DeviceArray(9., dtype=float32)
+Array(9., dtype=float32)
 (Pdb) p g
-DeviceArray(-0.91113025, dtype=float32)
+Array(-0.91113025, dtype=float32)
 (Pdb) q
 ```
 

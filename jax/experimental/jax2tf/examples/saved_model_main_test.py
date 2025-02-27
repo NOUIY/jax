@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2020 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,8 +17,9 @@ import os
 from absl import flags
 from absl.testing import absltest
 from absl.testing import parameterized
+
+from jax._src import config
 from jax._src import test_util as jtu
-from jax.config import config
 
 from jax.experimental.jax2tf.examples import saved_model_main
 from jax.experimental.jax2tf.tests import tf_test_util
@@ -47,6 +48,10 @@ class SavedModelMainTest(tf_test_util.JaxToTfTestCase):
   def test_train_and_save_full(self,
                                model="mnist_flax",
                                serving_batch_size=-1):
+    if (serving_batch_size == -1 and
+        config.jax2tf_default_native_serialization.value and
+        not config.dynamic_shapes.value):
+      self.skipTest("shape polymorphism but --jax_dynamic_shapes is not set.")
     FLAGS.model = model
     FLAGS.model_classifier_layer = True
     FLAGS.serving_batch_size = serving_batch_size

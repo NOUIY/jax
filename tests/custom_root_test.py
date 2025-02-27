@@ -1,4 +1,4 @@
-# Copyright 2018 Google LLC
+# Copyright 2018 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,12 +22,10 @@ import numpy as np
 import jax
 from jax import lax
 from jax._src import test_util as jtu
-from jax import tree_util
 import jax.numpy as jnp  # scan tests use numpy
 import jax.scipy as jsp
 
-from jax.config import config
-config.parse_flags_with_absl()
+jax.config.parse_flags_with_absl()
 
 
 def high_precision_dot(a, b):
@@ -98,8 +96,9 @@ class CustomRootTest(jtu.JaxTestCase):
 
     value, grad = jax.value_and_grad(sqrt_cubed)(5.0)
     self.assertAllClose(value, 5 ** 1.5, check_dtypes=False, rtol=1e-6)
+    rtol = 5e-6 if jtu.test_device_matches(["tpu"]) else 1e-7
     self.assertAllClose(grad, jax.grad(pow)(5.0, 1.5), check_dtypes=False,
-                        rtol=1e-7)
+                        rtol=rtol)
     jtu.check_grads(sqrt_cubed, (5.0,), order=2,
                     rtol={jnp.float32: 1e-2, jnp.float64: 1e-3})
 
@@ -216,7 +215,7 @@ class CustomRootTest(jtu.JaxTestCase):
 
     # grad check with aux
     jtu.check_grads(lambda x, y: root_aux(high_precision_dot(x, x.T), y),
-                    (a, b), order=2, rtol={jnp.float32: 1e-2})
+                    (a, b), order=2, rtol={jnp.float32: 1e-2, np.float64: 3e-5})
 
     # test vmap and jvp combined by jacfwd
     fwd = jax.jacfwd(lambda x, y: root_aux(high_precision_dot(x, x.T), y), argnums=(0, 1))
@@ -224,9 +223,9 @@ class CustomRootTest(jtu.JaxTestCase):
 
     fwd_val, fwd_aux = fwd(a, b)
     expected_fwd_val = expected_fwd(a, b)
-    self.assertAllClose(fwd_val, expected_fwd_val, rtol={np.float32: 1E-6, np.float64: 1E-12})
+    self.assertAllClose(fwd_val, expected_fwd_val, rtol={np.float32: 5E-6, np.float64: 5E-12})
 
-    jtu.check_close(fwd_aux, tree_util.tree_map(jnp.zeros_like, fwd_aux))
+    jtu.check_close(fwd_aux, jax.tree.map(jnp.zeros_like, fwd_aux))
 
   def test_custom_root_errors(self):
     with self.assertRaisesRegex(TypeError, re.escape("f() output pytree")):

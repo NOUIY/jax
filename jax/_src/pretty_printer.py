@@ -1,4 +1,4 @@
-# Copyright 2021 Google LLC
+# Copyright 2021 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -25,11 +25,16 @@
 # Annotations. https://ayazhafiz.com/articles/21/strictly-annotated
 #
 
-import abc
+from __future__ import annotations
+
+from collections.abc import Sequence
 import enum
 from functools import partial
-from typing import List, NamedTuple, Optional, Sequence, Tuple, Union
-from jax.config import config
+import sys
+from typing import Any, NamedTuple
+
+from jax._src import config
+from jax._src import util
 
 try:
   import colorama  # pytype: disable=import-error
@@ -37,19 +42,55 @@ except ImportError:
   colorama = None
 
 
-class Doc(abc.ABC):
+_PPRINT_USE_COLOR = config.bool_state(
+    'jax_pprint_use_color',
+    True,
+    help='Enable jaxpr pretty-printing with colorful syntax highlighting.'
+)
+
+def _can_use_color() -> bool:
+  try:
+    # Check if we're in IPython or Colab
+    ipython = get_ipython()  # type: ignore[name-defined]
+    shell = ipython.__class__.__name__
+    if shell == "ZMQInteractiveShell":
+      # Jupyter Notebook
+      return True
+    elif "colab" in str(ipython.__class__):
+      # Google Colab (external or internal)
+      return True
+  except NameError:
+    pass
+  # Otherwise check if we're in a terminal
+  return hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
+
+CAN_USE_COLOR = _can_use_color()
+
+class Doc(util.StrictABC):
   __slots__ = ()
 
-  def format(self, width: int = 80, use_color: bool = False,
-             annotation_prefix=" # ") -> str:
-    use_color = use_color or config.FLAGS.jax_pprint_use_color
+  def format(
+    self, width: int = 80, *, use_color: bool | None = None,
+    annotation_prefix: str = " # ",
+    source_map: list[list[tuple[int, int, Any]]] | None = None
+  ) -> str:
+    """
+    Formats a pretty-printer document as a string.
+
+    Args:
+    source_map: for each line in the output, contains a list of
+      (start column, end column, source) tuples. Each tuple associates a
+      region of output text with a source.
+    """
+    if use_color is None:
+      use_color = CAN_USE_COLOR and _PPRINT_USE_COLOR.value
     return _format(self, width, use_color=use_color,
-                   annotation_prefix=annotation_prefix)
+                   annotation_prefix=annotation_prefix, source_map=source_map)
 
   def __str__(self):
     return self.format()
 
-  def __add__(self, other: 'Doc') -> 'Doc':
+  def __add__(self, other: Doc) -> Doc:
     return concat([self, other])
 
 class _NilDoc(Doc):
@@ -60,9 +101,9 @@ _nil = _NilDoc()
 class _TextDoc(Doc):
   __slots__ = ("text", "annotation")
   text: str
-  annotation: Optional[str]
+  annotation: str | None
 
-  def __init__(self, text: str, annotation: Optional[str] = None):
+  def __init__(self, text: str, annotation: str | None = None):
     assert isinstance(text, str), text
     assert annotation is None or isinstance(annotation, str), annotation
     self.text = text
@@ -76,7 +117,7 @@ class _TextDoc(Doc):
 
 class _ConcatDoc(Doc):
   __slots__ = ("children",)
-  children: List[Doc]
+  children: list[Doc]
 
   def __init__(self, children: Sequence[Doc]):
     self.children = list(children)
@@ -117,20 +158,35 @@ class _NestDoc(Doc):
   def __repr__(self): return f"nest({self.n, self.child})"
 
 
-Color = enum.Enum("_Color", ["BLACK", "RED", "GREEN", "YELLOW", "BLUE",
-                             "MAGENTA", "CYAN", "WHITE", "RESET"])
-Intensity = enum.Enum("_Intensity", ["DIM", "NORMAL", "BRIGHT"])
+_NO_SOURCE = object()
+
+class _SourceMapDoc(Doc):
+  __slots__ = ("child", "source")
+  child: Doc
+  source: Any
+
+  def __init__(self, child: Doc, source: Any):
+    assert isinstance(child, Doc), child
+    self.child = child
+    self.source = source
+
+  def __repr__(self): return f"source({self.child}, {self.source})"
+
+
+Color = enum.Enum("Color", ["BLACK", "RED", "GREEN", "YELLOW", "BLUE",
+                            "MAGENTA", "CYAN", "WHITE", "RESET"])
+Intensity = enum.Enum("Intensity", ["DIM", "NORMAL", "BRIGHT"])
 
 class _ColorDoc(Doc):
   __slots__ = ("foreground", "background", "intensity", "child")
-  foreground: Optional[Color]
-  background: Optional[Color]
-  intensity: Optional[Intensity]
+  foreground: Color | None
+  background: Color | None
+  intensity: Intensity | None
   child: Doc
 
-  def __init__(self, child: Doc, *, foreground: Optional[Color] = None,
-               background: Optional[Color] = None,
-               intensity: Optional[Intensity] = None):
+  def __init__(self, child: Doc, *, foreground: Color | None = None,
+               background: Color | None = None,
+               intensity: Intensity | None = None):
     assert isinstance(child, Doc), child
     self.child = child
     self.foreground = foreground
@@ -145,7 +201,7 @@ _BreakMode = enum.Enum("_BreakMode", ["FLAT", "BREAK"])
 # non-recursive formulation using an explicit stack, necessary because Python
 # doesn't have a tail recursion optimization.
 
-def _fits(doc: Doc, width: int, agenda: List[Tuple[int, _BreakMode, Doc]]
+def _fits(doc: Doc, width: int, agenda: list[tuple[int, _BreakMode, Doc]]
          ) -> bool:
   while width >= 0 and len(agenda) > 0:
     i, m, doc = agenda.pop()
@@ -163,7 +219,7 @@ def _fits(doc: Doc, width: int, agenda: List[Tuple[int, _BreakMode, Doc]]
       agenda.append((i + doc.n, m, doc.child))
     elif isinstance(doc, _GroupDoc):
       agenda.append((i, _BreakMode.FLAT, doc.child))
-    elif isinstance(doc, _ColorDoc):
+    elif isinstance(doc, _ColorDoc) or isinstance(doc, _SourceMapDoc):
       agenda.append((i, m, doc.child))
     else:
       raise ValueError("Invalid document ", doc)
@@ -194,7 +250,7 @@ def _sparse(doc: Doc) -> bool:
       agenda.append(doc.child)
     elif isinstance(doc, _GroupDoc):
       agenda.append(doc.child)
-    elif isinstance(doc, _ColorDoc):
+    elif isinstance(doc, _ColorDoc) or isinstance(doc, _SourceMapDoc):
       agenda.append(doc.child)
     else:
       raise ValueError("Invalid document ", doc)
@@ -211,15 +267,16 @@ class _State(NamedTuple):
   mode: _BreakMode
   doc: Doc
   color: _ColorState
+  source_map: Any
 
 class _Line(NamedTuple):
   text: str
   width: int
-  annotations: Union[Optional[str], List[str]]
+  annotations: str | None | list[str]
 
 
 def _update_color(use_color: bool, state: _ColorState, update: _ColorState
-                 ) -> Tuple[_ColorState, str]:
+                 ) -> tuple[_ColorState, str]:
   if not use_color or colorama is None:
     return update, ""
   color_str = ""
@@ -228,7 +285,7 @@ def _update_color(use_color: bool, state: _ColorState, update: _ColorState
   if state.background != update.background:
     color_str += getattr(colorama.Back, str(update.background.name))
   if state.intensity != update.intensity:
-    color_str += colorama.Style.NORMAL
+    color_str += colorama.Style.NORMAL  # pytype: disable=unsupported-operands
     color_str += getattr(colorama.Style, str(update.intensity.name))
   return update, color_str
 
@@ -253,17 +310,29 @@ def _align_annotations(lines):
 
 
 
-def _format(doc: Doc, width: int, *, use_color, annotation_prefix) -> str:
+def _format(
+  doc: Doc, width: int, *, use_color: bool, annotation_prefix: str,
+  source_map: list[list[tuple[int, int, Any]]] | None
+) -> str:
   lines = []
   default_colors = _ColorState(Color.RESET, Color.RESET, Intensity.NORMAL)
   annotation_colors = _ColorState(Color.RESET, Color.RESET, Intensity.DIM)
   color_state = default_colors
-  agenda = [_State(0, _BreakMode.BREAK, doc, default_colors)]
+  source_start = 0       # The column at which the current source region starts.
+  source = _NO_SOURCE    # The currently active source region.
+  line_source_map = []  # Source maps for the current line of text.
+  agenda = [_State(0, _BreakMode.BREAK, doc, default_colors, source)]
   k = 0
   line_text = ""
   line_annotations = []
   while len(agenda) > 0:
-    i, m, doc, color = agenda.pop()
+    i, m, doc, color, agenda_source = agenda.pop()
+    if source_map is not None and agenda_source != source:
+      pos = len(line_text)
+      if source_start != pos and source is not _NO_SOURCE:
+        line_source_map.append((source_start, pos, source))
+      source = agenda_source
+      source_start = pos
     if isinstance(doc, _NilDoc):
       pass
     elif isinstance(doc, _TextDoc):
@@ -274,7 +343,7 @@ def _format(doc: Doc, width: int, *, use_color, annotation_prefix) -> str:
         line_annotations.append(doc.annotation)
       k += len(doc.text)
     elif isinstance(doc, _ConcatDoc):
-      agenda.extend(_State(i, m, d, color)
+      agenda.extend(_State(i, m, d, color, source)
                     for d in reversed(doc.children))
     elif isinstance(doc, _BreakDoc):
       if m == _BreakMode.BREAK:
@@ -283,6 +352,13 @@ def _format(doc: Doc, width: int, *, use_color, annotation_prefix) -> str:
                                                  annotation_colors)
           line_text += color_str
         lines.append(_Line(line_text, k, line_annotations))
+        if source_map is not None:
+          pos = len(line_text)
+          if source_start != pos and source is not _NO_SOURCE:
+            line_source_map.append((source_start, pos, source))
+          source_map.append(line_source_map)
+          line_source_map = []
+          source_start = i
         line_text = " " * i
         line_annotations = []
         k = i
@@ -292,20 +368,22 @@ def _format(doc: Doc, width: int, *, use_color, annotation_prefix) -> str:
         line_text += doc.text
         k += len(doc.text)
     elif isinstance(doc, _NestDoc):
-      agenda.append(_State(i + doc.n, m, doc.child, color))
+      agenda.append(_State(i + doc.n, m, doc.child, color, source))
     elif isinstance(doc, _GroupDoc):
       # In Lindig's paper, _fits is passed the remainder of the document.
       # I'm pretty sure that's a bug and we care only if the current group fits!
       if (_sparse(doc)
           and _fits(doc, width - k, [(i, _BreakMode.FLAT, doc.child)])):
-        agenda.append(_State(i, _BreakMode.FLAT, doc.child, color))
+        agenda.append(_State(i, _BreakMode.FLAT, doc.child, color, source))
       else:
-        agenda.append(_State(i, _BreakMode.BREAK, doc.child, color))
+        agenda.append(_State(i, _BreakMode.BREAK, doc.child, color, source))
     elif isinstance(doc, _ColorDoc):
       color = _ColorState(doc.foreground or color.foreground,
                           doc.background or color.background,
                           doc.intensity or color.intensity)
-      agenda.append(_State(i, m, doc.child, color))
+      agenda.append(_State(i, m, doc.child, color, source))
+    elif isinstance(doc, _SourceMapDoc):
+      agenda.append(_State(i, m, doc.child, color, doc.source))
     else:
       raise ValueError("Invalid document ", doc)
 
@@ -313,6 +391,11 @@ def _format(doc: Doc, width: int, *, use_color, annotation_prefix) -> str:
     color_state, color_str = _update_color(use_color, color_state,
                                            annotation_colors)
     line_text += color_str
+  if source_map is not None:
+    pos = len(line_text)
+    if source_start != pos and source is not _NO_SOURCE:
+      line_source_map.append((source_start, pos, source))
+    source_map.append(line_source_map)
   lines.append(_Line(line_text, k, line_annotations))
   lines = _align_annotations(lines)
   out = "\n".join(
@@ -331,7 +414,7 @@ def nil() -> Doc:
   """An empty document."""
   return _nil
 
-def text(s: str, annotation: Optional[str] = None) -> Doc:
+def text(s: str, annotation: str | None = None) -> Doc:
   """Literal text."""
   return _TextDoc(s, annotation)
 
@@ -363,9 +446,9 @@ def nest(n: int, doc: Doc) -> Doc:
   return _NestDoc(n, doc)
 
 
-def color(doc: Doc, *, foreground: Optional[Color] = None,
-          background: Optional[Color] = None,
-          intensity: Optional[Intensity] = None):
+def color(doc: Doc, *, foreground: Color | None = None,
+          background: Color | None = None,
+          intensity: Intensity | None = None):
   """ANSI colors.
 
   Overrides the foreground/background/intensity of the text for the child doc.
@@ -375,6 +458,17 @@ def color(doc: Doc, *, foreground: Optional[Color] = None,
   return _ColorDoc(doc, foreground=foreground, background=background,
                    intensity=intensity)
 
+
+def source_map(doc: Doc, source: Any):
+  """Source mapping.
+
+  A source map associates a region of the pretty-printer's text output with a
+  source location that produced it. For the purposes of the pretty printer a
+  ``source`` may be any object: we require only that we can compare sources for
+  equality. A text region to source object mapping can be populated as a side
+  output of the ``format`` method.
+  """
+  return _SourceMapDoc(doc, source)
 
 type_annotation = partial(color, intensity=Intensity.NORMAL,
                           foreground=Color.MAGENTA)

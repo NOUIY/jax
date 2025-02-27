@@ -1,4 +1,4 @@
-# Copyright 2019 Google LLC
+# Copyright 2019 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +13,8 @@
 # limitations under the License.
 
 """JAX tools."""
+
+load("@rules_python//python:py_binary.bzl", "py_binary")
 
 def _shell_quote(s):
     """Copy of bazel-skylib's shell.quote.
@@ -138,25 +140,24 @@ def jax_to_ir(name, deps, fn, input_shapes, constants = None, format = "HLO"):
 from absl import app
 import jax.tools.jax_to_ir as jax_to_ir
 
-jax_to_ir.set_up_flags()
 app.run(jax_to_ir.main)
 EOF
         """.format(runner = runner),
     )
 
     if format == "TF":
-        jax_to_ir_rule = "//third_party/py/jax/tools:jax_to_ir_with_tensorflow"
+        jax_to_ir_rule = "//jax/tools:jax_to_ir_with_tensorflow"
     else:
-        jax_to_ir_rule = "//third_party/py/jax/tools:jax_to_ir"
+        jax_to_ir_rule = "//jax/tools:jax_to_ir"
 
-    native.py_binary(
+    py_binary(
         name = runner,
         srcs = [
             runner + ".py",
         ],
         python_version = "PY3",
         deps = deps + [
-            "//third_party/py/jax/jaxlib",
+            "//third_party/py/absl:app",
             jax_to_ir_rule,
         ],
     )
@@ -168,7 +169,7 @@ EOF
     native.genrule(
         name = name + "_jax_to_ir_genrule",
         outs = [name + ".pb", name + ".txt"],
-        exec_tools = [runner],
+        tools = [runner],
         cmd = """
         JAX_PLATFORM_NAME=cpu \
         '$(location {runner})' \

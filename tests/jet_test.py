@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2020 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -29,16 +29,15 @@ from jax.example_libraries import stax
 from jax.experimental.jet import jet, fact, zero_series
 from jax import lax
 
-from jax.config import config
-config.parse_flags_with_absl()
+jax.config.parse_flags_with_absl()
 
 def jvp_taylor(fun, primals, series):
   # Computes the Taylor series the slow way, with nested jvp.
   order, = set(map(len, series))
   primals = tuple(jnp.asarray(p) for p in primals)
   def composition(eps):
-    taylor_terms = [sum([eps ** (i+1) * terms[i] / fact(i + 1)
-                         for i in range(len(terms))]) for terms in series]
+    taylor_terms = [sum(eps ** (i+1) * terms[i] / fact(i + 1)
+                         for i in range(len(terms))) for terms in series]
     nudged_args = [(x + t).astype(x.dtype) for x, t in zip(primals, taylor_terms)]
     return fun(*nudged_args)
   primal_out = fun(*primals)
@@ -57,6 +56,10 @@ class JetTest(jtu.JaxTestCase):
 
   def check_jet(self, fun, primals, series, atol=1e-5, rtol=1e-5,
                 check_dtypes=True):
+    # Convert to jax arrays to ensure dtype canonicalization.
+    primals = jax.tree.map(jnp.asarray, primals)
+    series = jax.tree.map(jnp.asarray, series)
+
     y, terms = jet(fun, primals, series)
     expected_y, expected_terms = jvp_taylor(fun, primals, series)
 
@@ -68,6 +71,9 @@ class JetTest(jtu.JaxTestCase):
 
   def check_jet_finite(self, fun, primals, series, atol=1e-5, rtol=1e-5,
                        check_dtypes=True):
+    # Convert to jax arrays to ensure dtype canonicalization.
+    primals = jax.tree.map(jnp.asarray, primals)
+    series = jax.tree.map(jnp.asarray, series)
 
     y, terms = jet(fun, primals, series)
     expected_y, expected_terms = jvp_taylor(fun, primals, series)
@@ -88,6 +94,8 @@ class JetTest(jtu.JaxTestCase):
                         check_dtypes=check_dtypes)
 
   @jtu.skip_on_devices("tpu")
+  # Default tolerance too tight on A100 after openxla/xla@a58070090
+  @jax.default_matmul_precision("float32")
   def test_dot(self):
     M, K, N = 2, 3, 4
     order = 3
@@ -101,6 +109,7 @@ class JetTest(jtu.JaxTestCase):
     self.check_jet(jnp.dot, primals, series_in)
 
   @jtu.skip_on_devices("tpu")
+  @jax.legacy_prng_key('allow')
   def test_conv(self):
     order = 3
     input_shape = (1, 5, 5, 1)
@@ -111,12 +120,12 @@ class JetTest(jtu.JaxTestCase):
 
     rng = self.rng()
 
-    x = rng.randn(*input_shape)
+    x = rng.randn(*input_shape).astype(W.dtype)
     primals = (W, b, x)
 
-    series_in1 = [rng.randn(*W.shape) for _ in range(order)]
-    series_in2 = [rng.randn(*b.shape) for _ in range(order)]
-    series_in3 = [rng.randn(*x.shape) for _ in range(order)]
+    series_in1 = [rng.randn(*W.shape).astype(W.dtype) for _ in range(order)]
+    series_in2 = [rng.randn(*b.shape).astype(W.dtype) for _ in range(order)]
+    series_in3 = [rng.randn(*x.shape).astype(W.dtype) for _ in range(order)]
 
     series_in = (series_in1, series_in2, series_in3)
 
@@ -181,7 +190,7 @@ class JetTest(jtu.JaxTestCase):
     primals = (primal_in, )
     series = (terms_in, )
 
-    y, terms = jax.experimental.jet._expit_taylor(primals, series)
+    y, terms = jax.experimental.jet._logistic_taylor(primals, series)
     expected_y, expected_terms = jvp_taylor(jax.scipy.special.expit, primals, series)
 
     atol = 1e-4
@@ -234,6 +243,8 @@ class JetTest(jtu.JaxTestCase):
   @jtu.skip_on_devices("tpu")
   def test_ceil(self):       self.unary_check(jnp.ceil)
   @jtu.skip_on_devices("tpu")
+  def test_trunc(self):       self.unary_check(jnp.trunc)
+  @jtu.skip_on_devices("tpu")
   def test_round(self):      self.unary_check(lax.round)
   @jtu.skip_on_devices("tpu")
   def test_sign(self):       self.unary_check(lax.sign)
@@ -274,9 +285,10 @@ class JetTest(jtu.JaxTestCase):
   @jtu.skip_on_devices("tpu")
   def test_cosh(self):       self.unary_check(jnp.cosh)
   @jtu.skip_on_devices("tpu")
-  def test_tanh(self):       self.unary_check(jnp.tanh, lims=[-500, 500], order=5)
+  def test_tanh(self):       self.unary_check(jnp.tanh, lims=[-500, 500], order=5,
+                                              atol=5e-3)
   @jtu.skip_on_devices("tpu")
-  def test_expit(self):      self.unary_check(jax.scipy.special.expit, lims=[-100, 100], order=5)
+  def test_logistic(self):   self.unary_check(lax.logistic, lims=[-100, 100], order=5)
   @jtu.skip_on_devices("tpu")
   def test_expit2(self):     self.expit_check(lims=[-500, 500], order=5)
   @jtu.skip_on_devices("tpu")
@@ -304,7 +316,11 @@ class JetTest(jtu.JaxTestCase):
   @jtu.skip_on_devices("tpu")
   def test_cummin(self):     self.unary_check(partial(lax.cummin, axis=0))
   @jtu.skip_on_devices("tpu")
-  def test_dynamic_slice(self):     self.unary_check(partial(lax.dynamic_slice, start_indices=(0,0), slice_sizes=(1,1)))
+  def test_dynamic_slice(self): self.unary_check(partial(lax.dynamic_slice, start_indices=(1,2), slice_sizes=(1,1)))
+  @jtu.skip_on_devices("tpu")
+  def test_dynamic_update_slice(self): self.unary_check(partial(lax.dynamic_update_slice, start_indices=(1,2), update=np.arange(6.0).reshape(2, 3)))
+  @jtu.skip_on_devices("tpu")
+  def test_copy(self):       self.unary_check(jnp.array)
 
 
   @jtu.skip_on_devices("tpu")
@@ -370,11 +386,13 @@ class JetTest(jtu.JaxTestCase):
     terms_x = [rng.randn(*x.shape) for _ in range(order)]
     terms_y = [rng.randn(*y.shape) for _ in range(order)]
     series_in = (terms_b, terms_x, terms_y)
-    self.check_jet(jnp.where, primals, series_in, rtol=5e-4)
+    # Since this nudges bool inputs, we need to allow promotion to float.
+    with jax.numpy_dtype_promotion('standard'):
+      self.check_jet(jnp.where, primals, series_in, rtol=5e-4)
 
   def test_inst_zero(self):
     def f(x):
-      return 2.
+      return jnp.full_like(x, 2.)
     def g(x):
       return 2. + 0 * x
     x = jnp.ones(1)
@@ -384,11 +402,11 @@ class JetTest(jtu.JaxTestCase):
 
     g_out_primals, g_out_series = jet(g, (x, ), ([jnp.ones_like(x) for _ in range(order)], ))
 
-    assert g_out_primals == f_out_primals
-    assert g_out_series == f_out_series
+    self.assertArraysEqual(g_out_primals, f_out_primals)
+    self.assertArraysEqual(g_out_series, f_out_series)
 
   def test_add_any(self):
-    # https://github.com/google/jax/issues/5217
+    # https://github.com/jax-ml/jax/issues/5217
     f = lambda x, eps: x * eps + eps + x
     def g(eps):
       x = jnp.array(1.)
@@ -396,7 +414,7 @@ class JetTest(jtu.JaxTestCase):
     jet(g, (1.,), ([1.],))  # doesn't crash
 
   def test_scatter_add(self):
-    # very basic test from https://github.com/google/jax/issues/5365
+    # very basic test from https://github.com/jax-ml/jax/issues/5365
     def f(x):
       x0 = x[0]
       x1 = x[1]

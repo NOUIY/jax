@@ -1,4 +1,4 @@
-# Copyright 2021 Google LLC
+# Copyright 2021 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,33 +14,38 @@
 
 """Base JAX Sparse object."""
 import abc
-from typing import Tuple
+from collections.abc import Sequence
+import math
 
-from jax import core
-import jax.numpy as jnp
+import jax
+from jax._src import core
 from jax._src import util
+from jax._src.typing import Array
 
 
-class JAXSparse(abc.ABC):
+class JAXSparse(util.StrictABC):
   """Base class for high-level JAX sparse objects."""
-  data: jnp.ndarray
-  shape: Tuple[int, ...]
+  data: jax.Array
+  shape: tuple[int, ...]
   nse: property
   dtype: property
 
   # Ignore type because of https://github.com/python/mypy/issues/4266.
   __hash__ = None  # type: ignore
 
-  @property
-  def size(self):
-    return util.prod(self.shape)
+  def __len__(self):
+    return self.shape[0]
 
   @property
-  def ndim(self):
+  def size(self) -> int:
+    return math.prod(self.shape)
+
+  @property
+  def ndim(self) -> int:
     return len(self.shape)
 
-  def __init__(self, args, *, shape):
-    self.shape = tuple(shape)
+  def __init__(self, args: tuple[Array, ...], *, shape: Sequence[int]):
+    self.shape = core.canonicalize_shape(shape)
 
   def __repr__(self):
     name = self.__class__.__name__
@@ -51,7 +56,7 @@ class JAXSparse(abc.ABC):
     except:
       repr_ = f"{name}(<invalid>)"
     else:
-      repr_ = f"{name}({dtype}{shape}, nse={nse})"
+      repr_ = f"{name}({dtype}{shape}, {nse=})"
     if isinstance(self.data, core.Tracer):
       repr_ = f"{type(self.data).__name__}[{repr_}]"
     return repr_
@@ -61,8 +66,9 @@ class JAXSparse(abc.ABC):
     ...
 
   @classmethod
+  @abc.abstractmethod
   def tree_unflatten(cls, aux_data, children):
-    return cls(children, **aux_data)
+    ...
 
   @abc.abstractmethod
   def transpose(self, axes=None):

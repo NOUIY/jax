@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2020 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,26 +18,31 @@ moving parts, at the expense of code size), and another using Flax.
 
 See README.md for how these are used.
 """
+
+from __future__ import annotations
+
+from collections.abc import Callable, Sequence
 import functools
 import logging
 import re
 import time
-from typing import Any, Callable, Optional, Sequence, Tuple
+from typing import Any
+import warnings
 from absl import flags
 
-import flax  # type: ignore[import]
 from flax import linen as nn
 
 import jax
 import jax.numpy as jnp
 
-from matplotlib import pyplot as plt  # type: ignore
+from matplotlib import pyplot as plt
 import numpy as np
-import tensorflow as tf  # type: ignore
+import optax
+import tensorflow as tf
 import tensorflow_datasets as tfds  # type: ignore
 
-flags.DEFINE_boolean("mock_data", False, "Use fake data, for testing.")
-FLAGS = flags.FLAGS
+_MOCK_DATA = flags.DEFINE_boolean("mock_data", False,
+                                  "Use fake data, for testing.")
 
 #### Model parameters
 
@@ -62,10 +67,12 @@ def load_mnist(split: tfds.Split, batch_size: int):
     an iterator with pairs (images, labels). The images have shape
     (B, 28, 28, 1) and the labels have shape (B, 10), where B is the batch_size.
   """
-  if FLAGS.mock_data:
+  if _MOCK_DATA.value:
     with tfds.testing.mock_data(num_examples=batch_size):
       try:
-        ds = tfds.load("mnist", split=split)
+        with warnings.catch_warnings():
+          warnings.simplefilter("ignore")
+          ds = tfds.load("mnist", split=split)
       except Exception as e:
         m = re.search(r'metadata files were not found in (.+/)mnist/', str(e))
         if m:
@@ -101,7 +108,7 @@ class PureJaxMNIST:
   name = "mnist_pure_jax"
 
   @staticmethod
-  def predict(params: Sequence[Tuple[Any, Any]], inputs, with_classifier=True):
+  def predict(params: Sequence[tuple[Any, Any]], inputs, with_classifier=True):
     """The prediction function.
 
     Args:
@@ -123,7 +130,7 @@ class PureJaxMNIST:
     final_w, final_b = params[-1]
     logits = jnp.dot(x, final_w) + final_b
     return logits - jax.scipy.special.logsumexp(
-      logits, axis=1, keepdims=True)  # type: ignore[attr-defined]
+      logits, axis=1, keepdims=True)
 
   @staticmethod
   def loss(params, inputs, labels):
@@ -231,10 +238,11 @@ class FlaxMNIST:
     return -jnp.mean(jnp.sum(predictions * labels, axis=1))
 
   @staticmethod
-  def update(optimizer, inputs, labels):
-    grad = jax.grad(FlaxMNIST.loss)(optimizer.target, inputs, labels)
-    optimizer = optimizer.apply_gradient(grad)
-    return optimizer
+  def update(tx, params, opt_state, inputs, labels):
+    grad = jax.grad(FlaxMNIST.loss)(params, inputs, labels)
+    updates, opt_state = tx.update(grad, opt_state)
+    params = optax.apply_updates(params, updates)
+    return params, opt_state
 
   @staticmethod
   def train(train_ds, test_ds, num_epochs, with_classifier=True):
@@ -252,20 +260,21 @@ class FlaxMNIST:
     momentum_mass = 0.9
 
     init_shape = jnp.ones((1,) + input_shape, jnp.float32)
-    initial_params = FlaxMNIST.model.init(rng, init_shape)["params"]
-    optimizer_def = flax.optim.Momentum(
-      learning_rate=step_size, beta=momentum_mass)
-    optimizer = optimizer_def.create(initial_params)
+    params = FlaxMNIST.model.init(rng, init_shape)["params"]
+    tx = optax.sgd(learning_rate=step_size, momentum=momentum_mass)
+    opt_state = tx.init(params)
 
     for epoch in range(num_epochs):
       start_time = time.time()
       for inputs, labels in tfds.as_numpy(train_ds):
-        optimizer = jax.jit(FlaxMNIST.update)(optimizer, inputs, labels)
+        params, opt_state = jax.jit(FlaxMNIST.update,
+                                    static_argnums=0)(tx, params, opt_state,
+                                                      inputs, labels)
       epoch_time = time.time() - start_time
       # Same accuracy function as for the pure JAX example
-      train_acc = PureJaxMNIST.accuracy(FlaxMNIST.predict, optimizer.target,
+      train_acc = PureJaxMNIST.accuracy(FlaxMNIST.predict, params,
                                         train_ds)
-      test_acc = PureJaxMNIST.accuracy(FlaxMNIST.predict, optimizer.target,
+      test_acc = PureJaxMNIST.accuracy(FlaxMNIST.predict, params,
                                        test_ds)
       logging.info("%s: Epoch %d in %0.2f sec", FlaxMNIST.name, epoch,
                    epoch_time)
@@ -277,7 +286,6 @@ class FlaxMNIST:
     # See discussion in README.md for packaging Flax models for conversion
     predict_fn = functools.partial(FlaxMNIST.predict,
                                    with_classifier=with_classifier)
-    params = optimizer.target
     return (predict_fn, params)
 
 
@@ -285,7 +293,7 @@ def plot_images(ds,
                 nr_rows: int,
                 nr_cols: int,
                 title: str,
-                inference_fn: Optional[Callable] = None):
+                inference_fn: Callable | None = None):
   """Plots a grid of images with their predictions.
 
   Params:

@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2020 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,33 +12,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
+from collections.abc import Callable, Sequence
 import contextlib
 import dataclasses
-import logging
 import re
 import os
-
-from typing import Any, Callable, List, Optional, Sequence, Tuple
+from typing import Any
 
 from absl.testing import absltest
+from absl import logging
+
 import jax
 from jax import dtypes
 from jax import numpy as jnp
 from jax._src import test_util as jtu
 from jax import tree_util
 
-from jax.config import config
 from jax.experimental import jax2tf
-from jax.interpreters import masking
-from jax._src import util
-import jax._src.lib.xla_bridge
+from jax import export
+from jax._src import config
+from jax._src import xla_bridge
 import numpy as np
-import tensorflow as tf  # type: ignore[import]
-from tensorflow.compiler.xla import xla_data_pb2  # type: ignore[import]
+import tensorflow as tf
+from tensorflow.compiler.xla import xla_data_pb2
+from tensorflow.compiler.tf2xla.python import xla as tfxla
 
 DType = Any
 
-def _make_tf_input_signature(*tf_args) -> List[tf.TensorSpec]:
+def _make_tf_input_signature(*tf_args) -> list[tf.TensorSpec]:
   # tf_args can be PyTrees
   def _make_one_array_signature(tf_arg):
     return tf.TensorSpec(np.shape(tf_arg), jax2tf.dtype_of_val(tf_arg))
@@ -49,14 +52,15 @@ def _run_tf_function(func_tf: Callable, *tf_args, mode: str):
   if mode == "eager":
     return func_tf(*tf_args)  # EAGER
   elif mode == "graph":
-    return tf.function(
+    return tf.function(  # GRAPH
         func_tf,
         autograph=False,
+        # Note that jit_compile defaults to True on TPU and False elsewhere
         input_signature=_make_tf_input_signature(*tf_args))(*tf_args)  # GRAPH
   elif mode == "compiled":
     # Adding an explicit input_signature prevents TF from constant-folding
     # the computation eagerly before compilation
-    return tf.function(
+    return tf.function(  # COMPILED
         func_tf,
         autograph=False,
         jit_compile=True,
@@ -88,10 +92,10 @@ def SaveAndLoadModel(model: tf.Module,
   return restored_model
 
 def SaveAndLoadFunction(f_tf: Callable, *,
-                        input_signature: Optional[Sequence[tf.TensorSpec]] = None,
-                        input_args: Optional[Sequence[Any]] = None,
+                        input_signature: Sequence[tf.TensorSpec] | None = None,
+                        input_args: Sequence[Any] | None = None,
                         variables: Sequence[tf.Variable] = (),
-                        save_gradients=True) -> Tuple[Callable, tf.train.Checkpoint]:
+                        save_gradients=True) -> tuple[Callable, tf.train.Checkpoint]:
   # Roundtrip through saved model on disk. Return the Checkpoint also
   # for the cases when there are variables. If you don't pass input_signature
   # then it is created from the input_args.
@@ -150,8 +154,15 @@ def ComputeTfValueAndGrad(tf_f: Callable, tf_args: Sequence,
   return f1(*args1)
 
 
-@jtu.with_config(jax_numpy_rank_promotion="allow")
+# TODO(necula): clean up the test harnesses to not require these flags
+@jtu.with_config(jax_numpy_rank_promotion="allow",
+                 jax_numpy_dtype_promotion='standard',
+                 jax_legacy_prng_key="allow",
+                 jax_debug_key_reuse=False)
 class JaxToTfTestCase(jtu.JaxTestCase):
+  # We want most tests to use the maximum available version, from the locally
+  # installed tfxla module and export.
+  use_max_serialization_version = True
 
   def setUp(self):
     super().setUp()
@@ -166,6 +177,23 @@ class JaxToTfTestCase(jtu.JaxTestCase):
     self.assertEqual(jtu.device_under_test().upper(),
                      self.tf_default_device.device_type)
 
+    # We run the tests using the maximum version supported, even though
+    # the default serialization version may be held back for a while to
+    # ensure compatibility
+    version = config.jax_export_calling_convention_version.value
+    if self.use_max_serialization_version:
+      # Use the largest supported by both export and tfxla.call_module
+      version = min(export.maximum_supported_calling_convention_version,
+                    tfxla.call_module_maximum_supported_version())
+      self.assertGreaterEqual(version,
+                              export.minimum_supported_calling_convention_version)
+      self.enter_context(config.jax_export_calling_convention_version(version))
+    logging.info(
+      "Using JAX serialization version %s (export.max_version %s, tf.XlaCallModule max version %s)",
+      version,
+      export.maximum_supported_calling_convention_version,
+      tfxla.call_module_maximum_supported_version())
+
     with contextlib.ExitStack() as stack:
       stack.enter_context(tf.device(self.tf_default_device))
       self.addCleanup(stack.pop_all().close)
@@ -176,7 +204,7 @@ class JaxToTfTestCase(jtu.JaxTestCase):
     def to_numpy_dtype(dt):
       return dt if isinstance(dt, np.dtype) else dt.as_numpy_dtype
 
-    if not config.x64_enabled and canonicalize_dtypes:
+    if not config.enable_x64.value and canonicalize_dtypes:
       self.assertEqual(
           dtypes.canonicalize_dtype(to_numpy_dtype(jtu._dtype(x))),
           dtypes.canonicalize_dtype(to_numpy_dtype(jtu._dtype(y))))
@@ -212,11 +240,13 @@ class JaxToTfTestCase(jtu.JaxTestCase):
 
     func_tf = jax2tf.convert(func_jax, enable_xla=enable_xla)
 
-    unexpected_successes: List[str] = []
+    unexpected_successes: list[str] = []
     # Run the "compiled" mode first, it is most important
     for mode in ("compiled", "eager", "graph"):
+      if mode == "graph" and jtu.device_under_test() == "tpu":
+        continue  # The "graph" mode on TPU is the same as "compiled"
       def log_message(extra):
-        return f"[{self._testMethodName}] mode={mode}: {extra}"
+        return f"[{self._testMethodName}] {mode=}: {extra}"
 
       jax2tf_limits = tuple(filter(lambda l: l.filter(mode=mode), limitations))
 
@@ -244,7 +274,7 @@ class JaxToTfTestCase(jtu.JaxTestCase):
         if expect_tf_error:
           # It is more ergonomic to print all successful modes once
           logging.warning(log_message(
-            f"Unexpected success with known limitations {expect_tf_error}"))
+            f"Unexpected execution success with known limitations {expect_tf_error}"))
           unexpected_successes.append(f"{mode}: {expect_tf_error}")
 
       if (jtu.device_under_test() == "gpu" and
@@ -263,7 +293,7 @@ class JaxToTfTestCase(jtu.JaxTestCase):
         logging.info(log_message(f"Using tol={max_tol} due to {max_tol_lim}"))
 
       # Convert results to np.arrays
-      result_tf = tf.nest.map_structure(lambda t: t.numpy(), result_tf)  # type: ignore
+      result_tf = tf.nest.map_structure(lambda t: t.numpy(), result_tf)
 
       custom_assert_lim = [l for l in jax2tf_limits if l.custom_assert]
       assert len(custom_assert_lim) <= 1, f"Expecting at most one applicable limitation with custom_assert, found {custom_assert_lim}"
@@ -291,10 +321,11 @@ class JaxToTfTestCase(jtu.JaxTestCase):
 
         logging.info("[%s] Logging HLO for exception in mode %s: %s",
                      self._testMethodName, mode, e)
-        jax_comp = jax.xla_computation(func_jax)(*args)
-        jax_hlo = jax_comp.as_hlo_text()
+        jax_lowered = jax.jit(func_jax).lower(*args)
+        # We log the HLO dialect for easier comparison with TF
         logging.info("[%s] JAX NON_OPT HLO\n%s",
-                     self._testMethodName, jax_hlo)
+                     self._testMethodName,
+                     jax_lowered.compiler_ir(dialect="hlo").as_hlo_text())  # type: ignore
 
         tf_args_signature = _make_tf_input_signature(*args)
         # If we give the signature, we cannot pass scalars
@@ -312,21 +343,15 @@ class JaxToTfTestCase(jtu.JaxTestCase):
         logging.info("[%s] TF NON OPT HLO\n{%s}", self._testMethodName,
                      tf_hlo)
 
-        backend = jax._src.lib.xla_bridge.get_backend()
-        modules = backend.compile(jax_comp).hlo_modules()
+        backend = xla_bridge.get_backend()
+        modules = backend.compile(str(jax_lowered.compiler_ir())).hlo_modules()
         jax_opt_hlo = modules[0].to_string()
         logging.info("[%s] JAX OPT HLO\n%s", self._testMethodName,
                      jax_opt_hlo)
 
-        # TODO(b/189265364): Remove this workaround
-        if (jtu.device_under_test() == "gpu" and
-            "dot_general" in self._testMethodName):
-          print(f"[{self._testMethodName}] Not logging TF OPT HLO because of "
-                f"crash in tf.experimental_get_compiler_ir (b/189265364)")
-        else:
-          tf_opt_hlo = tf_func_compiled.experimental_get_compiler_ir(*tf_args_no_scalars)(
-                      stage="optimized_hlo")
-          logging.info("[%s] TF OPT HLO\n%s", self._testMethodName, tf_opt_hlo)
+        tf_opt_hlo = tf_func_compiled.experimental_get_compiler_ir(*tf_args_no_scalars)(
+                    stage="optimized_hlo")
+        logging.info("[%s] TF OPT HLO\n%s", self._testMethodName, tf_opt_hlo)
 
         raise
 
@@ -341,7 +366,7 @@ class JaxToTfTestCase(jtu.JaxTestCase):
     return result_jax, result_tf
 
   def TransformConvertAndCompare(self, func: Callable, arg,
-                                 transform: Optional[str]):
+                                 transform: str | None):
     """Like ConvertAndCompare but first applies a transformation.
 
     `func` must be a function from one argument to one result. `arg` is
@@ -372,66 +397,29 @@ class JaxToTfTestCase(jtu.JaxTestCase):
       return self.ConvertAndCompare(grad_func, t_arg)
     assert False, transform
 
+  def TfToHlo(self, tf_fun: Callable, *args):
+    # Converts a tf.function to HLO text which we can inspect for occurrence of
+    # substrings. This works whether we use native serialization or not.
+    tf_function = tf.function(tf_fun, autograph=False, jit_compile=True)
+    return tf_function.experimental_get_compiler_ir(*args)(
+        stage="hlo", platform_name=jtu.device_under_test().upper()
+    )
 
-  def CheckShapePolymorphism(self, f_jax: Callable, *,
-                             input_signature: Sequence[tf.TensorSpec],
-                             polymorphic_shapes: Optional[Sequence[Any]],
-                             expected_output_signature: Optional[tf.TensorSpec] = None,
-                             enable_xla: bool = True):
-    """Converts a function using polymorphic shapes.
-
-    Args:
-      f_jax: a JAX function of `n` arguments
-      input_signature: used as the input signature for the tf.function.
-      polymorphic_shapes: Specifies input shapes to be treated polymorphically
-        during conversion.
-      expected_output_signature: if given, this function tests whether the
-        actual output signature is equal to this one.
-      enable_xla: Whether to enable XLA conversion for jax2tf.convert.
-    """
-    f_tf = jax2tf.convert(f_jax, polymorphic_shapes=polymorphic_shapes,
-                          enable_xla=enable_xla)
-    f_tf_func = tf.function(f_tf, autograph=False, input_signature=input_signature)
-    concrete_f_tf = f_tf_func.get_concrete_function(*input_signature)
-    if expected_output_signature:
-      # Strangely, output_shapes can be a single shape for a function with a
-      # single result, or a list/tuple of shapes.
-      concrete_output_tf_shape = concrete_f_tf.output_shapes
-      if not isinstance(concrete_output_tf_shape, (tuple, list)):  # Single result
-        assert not isinstance(expected_output_signature, (tuple, list))
-        expected_output_signature = [expected_output_signature]
-        concrete_output_tf_shape = [concrete_output_tf_shape]
-
-      for expected, found in util.safe_zip(expected_output_signature,
-                                           concrete_output_tf_shape):
-        self.assertEqual(tuple(expected.shape), tuple(found))
-    return f_tf
-
-  def MakeInputSignature(self, *polymorphic_shapes):
-    """From a pytree of in_shape string specification, make a pytree of tf.TensorSpec.
-
-    Dimension variables are replaced with None.
-    """
-
-    def polymorphic_shape_to_tensorspec(poly_shape: str) -> tf.TensorSpec:
-      in_spec = masking.parse_spec(poly_shape)
-      return tf.TensorSpec(
-          tuple(
-              int(dim_spec) if dim_spec.is_constant else None
-              for dim_spec in in_spec),
-          dtype=tf.float32)
-
-    return tree_util.tree_multimap(polymorphic_shape_to_tensorspec, polymorphic_shapes)
-
-  def CountLargeTfConstants(self, tf_fun: Callable, *args,
-                            at_least=256):
-    # A hacky way to count how many "large" constants are embedded in the
+  def FindLargeTfConstants(self, tf_fun: Callable, *args,
+                           at_least=256):
+    # A hacky way to find the "large" constants that are embedded in the
     # graph. We count the number of characters in the textual representation
     # of the constant.
     f_tf_graph = tf.function(tf_fun, autograph=False).get_concrete_function(*args).graph.as_graph_def()
-    matches = re.findall(r"tensor_content\s*:\s*\"([^\"]+)\"", str(f_tf_graph))
-    large_matches = [m for m in matches if len(m) >= at_least]
-    return len(large_matches)
+    if config.jax2tf_default_native_serialization.value:
+      # This way of finding constants may be brittle, if the constant representation
+      # contains >. It seems tobe hex-encoded, so this may be safe.
+      large_consts = [m for m in re.findall(r"dense<([^>]+)>", str(f_tf_graph)) if len(m) >= at_least]
+    else:
+      # We cannot find the constants just with string matching because their
+      # representation may contain escaped "
+      large_consts = [str(n) for n in f_tf_graph.node if n.op == "Const" and len(str(n)) >= at_least]
+    return large_consts
 
   def CheckOpMetadata(self, jax_fun, x,
                       expected: Sequence[OpMetadataGraph],

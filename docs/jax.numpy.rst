@@ -1,6 +1,5 @@
-
-jax.numpy package
-=================
+``jax.numpy`` module
+====================
 
 .. currentmodule:: jax.numpy
 
@@ -15,47 +14,44 @@ cannot follow NumPy exactly.
   in-place cannot be implemented in JAX. However, often JAX is able to provide
   an alternative API that is purely functional. For example, instead of in-place
   array updates (:code:`x[i] = y`), JAX provides an alternative pure indexed
-  update function :code:`x.at[i].set(y)`.
+  update function :code:`x.at[i].set(y)` (see :attr:`ndarray.at`).
 
-* Relatedly, some NumPy functions return views of arrays when possible (examples
-  are :func:`numpy.transpose` and :func:`numpy.reshape`). JAX versions of such
-  functions will return copies instead, although such copies can often be optimized
+* Relatedly, some NumPy functions often return views of arrays when possible
+  (examples are :func:`transpose` and :func:`reshape`). JAX versions of such
+  functions will return copies instead, although such are often optimized
   away by XLA when sequences of operations are compiled using :func:`jax.jit`.
 
 * NumPy is very aggressive at promoting values to :code:`float64` type. JAX
   sometimes is less aggressive about type promotion (See :ref:`type-promotion`).
 
-A small number of NumPy operations that have data-dependent output shapes are
-incompatible with :func:`jax.jit` compilation. The XLA compiler requires that
-shapes of arrays be known at compile time. While it would be possible to provide
-a JAX implementation of an API such as :func:`numpy.nonzero`, we would be unable
-to JIT-compile it because the shape of its output depends on the contents of the
-input data.
+* Some NumPy routines have data-dependent output shapes (examples include
+  :func:`unique` and :func:`nonzero`). Because the XLA compiler requires array
+  shapes to be known at compile time, such operations are not compatible with
+  JIT. For this reason, JAX adds an optional ``size`` argument to such functions
+  which may be specified statically in order to use them with JIT.
 
-Not every function in NumPy is implemented; contributions are welcome!
+Nearly all applicable NumPy functions are implemented in the ``jax.numpy``
+namespace; they are listed below.
 
 .. Generate the list below as follows:
    >>> import jax.numpy, numpy
-   >>> fns = set(dir(numpy)) & set(dir(jax.numpy)) - set(jax.numpy._NOT_IMPLEMENTED)
+   >>> fns = set(dir(numpy)) & set(dir(jax.numpy))
    >>> print('\n'.join('    ' + x for x in fns if callable(getattr(jax.numpy, x))))  # doctest: +SKIP
 
    # Finally, sort the list using sort(1), which is different than Python's
    # sorted() function.
 
 .. autosummary::
-   :toctree: _autosummary
-
-   ndarray.at
-
-.. autosummary::
   :toctree: _autosummary
 
+    ndarray.at
     abs
     absolute
+    acos
+    acosh
     add
     all
     allclose
-    alltrue
     amax
     amin
     angle
@@ -73,6 +69,7 @@ Not every function in NumPy is implemented; contributions are welcome!
     arctanh
     argmax
     argmin
+    argpartition
     argsort
     argwhere
     around
@@ -83,6 +80,12 @@ Not every function in NumPy is implemented; contributions are welcome!
     array_split
     array_str
     asarray
+    asin
+    asinh
+    astype
+    atan
+    atanh
+    atan2
     atleast_1d
     atleast_2d
     atleast_3d
@@ -90,8 +93,12 @@ Not every function in NumPy is implemented; contributions are welcome!
     bartlett
     bincount
     bitwise_and
+    bitwise_count
+    bitwise_invert
+    bitwise_left_shift
     bitwise_not
     bitwise_or
+    bitwise_right_shift
     bitwise_xor
     blackman
     block
@@ -114,10 +121,12 @@ Not every function in NumPy is implemented; contributions are welcome!
     complexfloating
     ComplexWarning
     compress
+    concat
     concatenate
     conj
     conjugate
     convolve
+    copy
     copysign
     corrcoef
     correlate
@@ -128,15 +137,16 @@ Not every function in NumPy is implemented; contributions are welcome!
     cross
     csingle
     cumprod
-    cumproduct
     cumsum
+    cumulative_prod
+    cumulative_sum
     deg2rad
     degrees
     delete
     diag
-    diagflat
     diag_indices
     diag_indices_from
+    diagflat
     diagonal
     diff
     digitize
@@ -160,6 +170,7 @@ Not every function in NumPy is implemented; contributions are welcome!
     extract
     eye
     fabs
+    fill_diagonal
     finfo
     fix
     flatnonzero
@@ -168,22 +179,30 @@ Not every function in NumPy is implemented; contributions are welcome!
     fliplr
     flipud
     float_
+    float_power
     float16
     float32
     float64
     floating
-    float_power
     floor
     floor_divide
     fmax
     fmin
     fmod
     frexp
+    frombuffer
+    fromfile
+    fromfunction
+    fromiter
+    frompyfunc
+    fromstring
+    from_dlpack
     full
     full_like
     gcd
-    get_printoptions
+    generic
     geomspace
+    get_printoptions
     gradient
     greater
     greater_equal
@@ -201,7 +220,6 @@ Not every function in NumPy is implemented; contributions are welcome!
     identity
     iinfo
     imag
-    in1d
     index_exp
     indices
     inexact
@@ -219,6 +237,7 @@ Not every function in NumPy is implemented; contributions are welcome!
     isclose
     iscomplex
     iscomplexobj
+    isdtype
     isfinite
     isin
     isinf
@@ -229,7 +248,6 @@ Not every function in NumPy is implemented; contributions are welcome!
     isrealobj
     isscalar
     issubdtype
-    issubsctype
     iterable
     ix_
     kaiser
@@ -255,6 +273,8 @@ Not every function in NumPy is implemented; contributions are welcome!
     logspace
     mask_indices
     matmul
+    matrix_transpose
+    matvec
     max
     maximum
     mean
@@ -266,8 +286,8 @@ Not every function in NumPy is implemented; contributions are welcome!
     mod
     modf
     moveaxis
-    msort
     multiply
+    nan_to_num
     nanargmax
     nanargmin
     nancumprod
@@ -281,7 +301,6 @@ Not every function in NumPy is implemented; contributions are welcome!
     nanquantile
     nanstd
     nansum
-    nan_to_num
     nanvar
     ndarray
     ndim
@@ -297,23 +316,29 @@ Not every function in NumPy is implemented; contributions are welcome!
     outer
     packbits
     pad
+    partition
     percentile
+    permute_dims
     piecewise
+    place
     poly
     polyadd
     polyder
+    polydiv
     polyfit
     polyint
     polymul
     polysub
     polyval
     positive
+    pow
     power
     printoptions
     prod
-    product
     promote_types
     ptp
+    put
+    put_along_axis
     quantile
     r_
     rad2deg
@@ -334,8 +359,6 @@ Not every function in NumPy is implemented; contributions are welcome!
     roots
     rot90
     round
-    round_
-    row_stack
     s_
     save
     savez
@@ -353,9 +376,9 @@ Not every function in NumPy is implemented; contributions are welcome!
     single
     sinh
     size
-    sometrue
     sort
     sort_complex
+    spacing
     split
     sqrt
     square
@@ -372,8 +395,8 @@ Not every function in NumPy is implemented; contributions are welcome!
     tensordot
     tile
     trace
+    trapezoid
     transpose
-    trapz
     tri
     tril
     tril_indices
@@ -384,19 +407,28 @@ Not every function in NumPy is implemented; contributions are welcome!
     triu_indices_from
     true_divide
     trunc
+    ufunc
+    uint
     uint16
     uint32
     uint64
     uint8
     union1d
     unique
+    unique_all
+    unique_counts
+    unique_inverse
+    unique_values
     unpackbits
     unravel_index
+    unstack
     unsignedinteger
     unwrap
     vander
     var
     vdot
+    vecdot
+    vecmat
     vectorize
     vsplit
     vstack
@@ -441,38 +473,96 @@ jax.numpy.linalg
 
   cholesky
   cond
+  cross
   det
+  diagonal
   eig
   eigh
   eigvals
   eigvalsh
   inv
   lstsq
+  matmul
+  matrix_norm
   matrix_power
   matrix_rank
+  matrix_transpose
   multi_dot
   norm
+  outer
   pinv
   qr
   slogdet
   solve
   svd
+  svdvals
+  tensordot
   tensorinv
   tensorsolve
+  trace
+  vector_norm
+  vecdot
 
-JAX DeviceArray
----------------
-The JAX :class:`~jax.numpy.DeviceArray` is the core array object in JAX: you can
-think of it as the equivalent of a :class:`numpy.ndarray` backed by a memory buffer
-on a single device. Like :class:`numpy.ndarray`, most users will not need to
-instantiate :class:`DeviceArray` objects manually, but rather will create them via
+JAX Array
+---------
+The JAX :class:`~jax.Array` (along with its alias, :class:`jax.numpy.ndarray`) is
+the core array object in JAX: you can think of it as JAX's equivalent of a
+:class:`numpy.ndarray`. Like :class:`numpy.ndarray`, most users will not need to
+instantiate :class:`~jax.Array` objects manually, but rather will create them via
 :mod:`jax.numpy` functions like :func:`~jax.numpy.array`, :func:`~jax.numpy.arange`,
 :func:`~jax.numpy.linspace`, and others listed above.
 
-.. autoclass:: jax.numpy.DeviceArray
+Copying and Serialization
+~~~~~~~~~~~~~~~~~~~~~~~~~
+JAX :class:`~jax.Array` objects are designed to work seamlessly with Python
+standard library tools where appropriate.
 
-.. autoclass:: jaxlib.xla_extension.DeviceArrayBase
+With the built-in :mod:`copy` module, when :func:`copy.copy` or :func:`copy.deepcopy`
+encounder an :class:`~jax.Array`, it is equivalent to calling the
+:meth:`~jax.Array.copy` method, which will create a copy of
+the buffer on the same device as the original array. This will work correctly within
+traced/JIT-compiled code, though copy operations may be elided by the compiler
+in this context.
 
-.. autoclass:: jaxlib.xla_extension.DeviceArray
-   :members:
-   :inherited-members:
+When the built-in :mod:`pickle` module encounters an :class:`~jax.Array`,
+it will be serialized via a compact bit representation in a similar manner to pickled
+:class:`numpy.ndarray` objects. When unpickled, the result will be a new
+:class:`~jax.Array` object *on the default device.*
+This is because in general, pickling and unpickling may take place in different runtime
+environments, and there is no general way to map the device IDs of one runtime
+to the device IDs of another. If :mod:`pickle` is used in traced/JIT-compiled code,
+it will result in a :class:`~jax.errors.ConcretizationTypeError`.
+
+.. _python-array-api:
+
+Python Array API standard
+-------------------------
+
+.. note::
+
+  Prior to JAX v0.4.32, you must ``import jax.experimental.array_api`` in order
+  to enable the array API for JAX arrays. After JAX v0.4.32, importing this
+  module is no longer required, and will raise a deprecation warning. After
+  JAX v0.5.0, this import will raise an error.
+
+Starting with JAX v0.4.32, :class:`jax.Array` and :mod:`jax.numpy` are compatible
+with the `Python Array API Standard`_. You can access the Array API namespace via
+:meth:`jax.Array.__array_namespace__`::
+
+    >>> def f(x):
+    ...   nx = x.__array_namespace__()
+    ...   return nx.sin(x) ** 2 + nx.cos(x) ** 2
+
+    >>> import jax.numpy as jnp
+    >>> x = jnp.arange(5)
+    >>> f(x).round()
+    Array([1., 1., 1., 1., 1.], dtype=float32)
+
+JAX departs from the standard in a few places, namely because JAX arrays are
+immutable, in-place updates are not supported. Some of these incompatibilities
+are being addressed via the `array-api-compat`_ module.
+
+For more information, refer to the `Python Array API Standard`_ documentation.
+
+.. _Python Array API Standard: https://data-apis.org/array-api
+.. _array-api-compat: https://github.com/data-apis/array-api-compat
