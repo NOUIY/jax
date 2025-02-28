@@ -1,5 +1,5 @@
-jax.image package
-=================
+``jax.image`` module
+====================
 
 .. currentmodule:: jax.image
 
@@ -15,3 +15,9 @@ Image manipulation functions
     resize
     scale_and_translate
 
+Argument classes
+----------------
+
+.. currentmodule:: jax.image
+
+.. autoclass:: ResizeMethod

@@ -1,4 +1,4 @@
-# Copyright 2018 Google LLC
+# Copyright 2018 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,13 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# flake8: noqa: F401
-from jax.interpreters.sharded_jit import (
-  sharded_jit as sharded_jit,
-  PartitionSpec as PartitionSpec,
-  with_sharding_constraint as with_sharding_constraint,
-)
+# Note: import <name> as <name> is required for names to be exported.
+# See PEP 484 & https://github.com/jax-ml/jax/issues/7570
+
 from jax.experimental.x64_context import (
   enable_x64 as enable_x64,
   disable_x64 as disable_x64,
+)
+from jax._src.callback import (
+  io_callback as io_callback
+)
+from jax._src.dtypes import (
+    primal_tangent_dtype as primal_tangent_dtype,
+)
+from jax._src.earray import (
+    EArray as EArray
 )

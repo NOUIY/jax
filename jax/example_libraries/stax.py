@@ -1,4 +1,4 @@
-# Copyright 2018 Google LLC
+# Copyright 2018 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,9 +14,14 @@
 
 """Stax is a small but flexible neural net specification library from scratch.
 
-For an example of its use, see examples/resnet50.py.
-"""
+You likely do not mean to import this module! Stax is intended as an example
+library only. There are a number of other much more fully-featured neural
+network libraries for JAX, including `Flax`_ from Google, and `Haiku`_ from
+DeepMind.
 
+.. _Haiku: https://github.com/deepmind/dm-haiku
+.. _Flax: https://github.com/google/flax
+"""
 
 import functools
 import operator as op
@@ -26,7 +31,7 @@ from jax import random
 import jax.numpy as jnp
 
 from jax.nn import (relu, log_softmax, softmax, softplus, sigmoid, elu,
-                    leaky_relu, selu, gelu, normalize)
+                    leaky_relu, selu, gelu, standardize)
 from jax.nn.initializers import glorot_normal, normal, ones, zeros
 
 # aliases for backwards compatibility
@@ -129,7 +134,7 @@ def BatchNorm(axis=(0, 1, 2), epsilon=1e-5, center=True, scale=True,
     # TODO(phawkins): jnp.expand_dims should accept an axis tuple.
     # (https://github.com/numpy/numpy/issues/12290)
     ed = tuple(None if i in axis else slice(None) for i in range(jnp.ndim(x)))
-    z = normalize(x, axis, epsilon=epsilon)
+    z = standardize(x, axis, epsilon=epsilon)
     if center and scale: return gamma[ed] * z + beta[ed]
     if center: return z + beta[ed]
     if scale: return gamma[ed] * z
@@ -263,7 +268,7 @@ def Dropout(rate, mode='train'):
       msg = ("Dropout layer requires apply_fun to be called with a PRNG key "
              "argument. That is, instead of `apply_fun(params, inputs)`, call "
              "it like `apply_fun(params, inputs, rng)` where `rng` is a "
-             "jax.random.PRNGKey value.")
+             "PRNG key (e.g. from `jax.random.key`).")
       raise ValueError(msg)
     if mode == 'train':
       keep = random.bernoulli(rng, rate, inputs.shape)

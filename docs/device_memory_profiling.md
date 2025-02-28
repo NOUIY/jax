@@ -1,6 +1,15 @@
-# Device Memory Profiling
+# Profiling device memory
 
-The JAX Device Memory Profiler allows us to explore how and why JAX programs are
+<!--* freshness: { reviewed: '2024-03-08' } *-->
+
+```{note}
+May 2023 update: we recommend using [Tensorboard
+profiling](tensorboard-profiling) for device memory analysis. After taking a
+profile, open the `memory_viewer` tab of the Tensorboard profiler for more
+detailed and understandable device memory usage.
+```
+
+The JAX device memory profiler allows us to explore how and why JAX programs are
 using GPU or TPU memory. For example, it can be used to:
 
 * Figure out which arrays and executables are in GPU memory at a given time, or
@@ -13,11 +22,11 @@ pprof (<https://github.com/google/pprof>). Start by installing `pprof`,
 by following its
 [installation instructions](https://github.com/google/pprof#building-pprof).
 At the time of writing, installing `pprof` requires first installing
-[Go](https://golang.org/) and [Graphviz](http://www.graphviz.org/), and then
-running
+[Go](https://golang.org/) of version 1.16+,
+[Graphviz](http://www.graphviz.org/), and then running
 
 ```shell
-go get -u github.com/google/pprof
+go install github.com/google/pprof@latest
 ```
 
 which installs `pprof` as `$GOPATH/bin/pprof`, where `GOPATH` defaults to
@@ -51,7 +60,7 @@ def func2(x):
   y = func1(x)
   return y, jnp.tile(x, 10) + 1
 
-x = jax.random.normal(jax.random.PRNGKey(42), (1000, 1000))
+x = jax.random.normal(jax.random.key(42), (1000, 1000))
 y, z = func2(x)
 
 z.block_until_ready()
@@ -99,14 +108,14 @@ import jax.numpy as jnp
 import jax.profiler
 
 def afunction():
-  return jax.random.normal(jax.random.PRNGKey(77), (1000000,))
+  return jax.random.normal(jax.random.key(77), (1000000,))
 
 z = afunction()
 
 def anotherfunc():
   arrays = []
   for i in range(1, 10):
-    x = jax.random.normal(jax.random.PRNGKey(42), (i, 10000))
+    x = jax.random.normal(jax.random.key(42), (i, 10000))
     arrays.append(x)
     x.block_until_ready()
     jax.profiler.save_device_memory_profile(f"memory{i}.prof")

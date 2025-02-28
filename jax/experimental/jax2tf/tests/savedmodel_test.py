@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2020 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,17 +19,27 @@ import jax
 from jax import lax
 import jax.numpy as jnp
 import numpy as np
-import tensorflow as tf  # type: ignore[import]
+import tensorflow as tf
 
 from jax.experimental import jax2tf
 from jax.experimental.jax2tf.tests import tf_test_util
 from jax._src import test_util as jtu
 
-from jax.config import config
-config.parse_flags_with_absl()
+jax.config.parse_flags_with_absl()
 
 
 class SavedModelTest(tf_test_util.JaxToTfTestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.warning_ctx = jtu.ignore_warning(
+        message="jax2tf.convert with native_serialization=False is deprecated"
+    )
+    self.warning_ctx.__enter__()
+
+  def tearDown(self):
+    self.warning_ctx.__exit__(None, None, None)
+    super().tearDown()
 
   def test_eval(self):
     f_jax = jax.jit(lambda x: jnp.sin(jnp.cos(x)))
@@ -166,7 +176,7 @@ class SavedModelTest(tf_test_util.JaxToTfTestCase):
 
     model = tf.Module()
     model._variables = tf.nest.flatten(params_vars)
-    model.f = tf.function(prediction_tf, jit_compile=True)
+    model.f = tf.function(prediction_tf, jit_compile=True, autograph=False)
 
     x = np.array(0.7, dtype=jnp.float32)
     self.assertAllClose(model.f(x), model_jax(params, x))
@@ -176,7 +186,7 @@ class SavedModelTest(tf_test_util.JaxToTfTestCase):
 
 
   def test_save_grad_integers(self):
-    # https://github.com/google/jax/issues/7123
+    # https://github.com/jax-ml/jax/issues/7123
     # In the end this is a test that does not involve JAX at all
     batch_size = 5
     state = np.array([1], dtype=np.int32)  # Works if float32
@@ -241,6 +251,41 @@ class SavedModelTest(tf_test_util.JaxToTfTestCase):
     res_restored = restored_f(*args)
     self.assertAllClose(res, res_restored)
 
+  def test_pytree(self):
+    def f_jax(params, x):
+      # params is a dict
+      return x @ params["w"] + params["b"]
+
+    x = np.ones((2, 3), dtype=np.float32)
+    params = dict(w=np.ones((3, 4), dtype=np.float32),
+                  b=np.ones((2, 4), dtype=np.float32))
+    res_jax = f_jax(params, x)
+    f_tf = jax2tf.convert(f_jax)
+
+    res_tf = f_tf(params, x)
+    self.assertAllClose(res_jax, res_tf.numpy())
+
+    restored_f, restored_model = tf_test_util.SaveAndLoadFunction(f_tf, input_args=(params, x),
+                                                                  save_gradients=True)
+    self.assertAllClose(restored_f(params, x).numpy(), res_tf.numpy())
+
+    # Gradients for the converted function
+    params_v = tf.nest.map_structure(tf.Variable, params)
+    with tf.GradientTape() as tape:
+      res = f_tf(params_v, x)
+      loss = tf.reduce_sum(res)
+      g_tf = tape.gradient(loss, params_v)
+
+    params_v = tf.nest.map_structure(tf.Variable, params)
+    with tf.GradientTape() as tape:
+      res = restored_f(params_v, x)
+      loss = tf.reduce_sum(res)
+      g_restored_f = tape.gradient(loss, params_v)
+
+    self.assertAllClose(g_tf["w"].numpy(), g_restored_f["w"].numpy())
+    self.assertAllClose(g_tf["b"].numpy(), g_restored_f["b"].numpy())
+
+
   def test_xla_context_preserved_slice(self):
     arr = np.arange(10, dtype=np.float32)
     def f_jax(arr):
@@ -256,8 +301,8 @@ class SavedModelTest(tf_test_util.JaxToTfTestCase):
   # Test does not work on GPU/TPU; would need something like TPU inference
   # converter to separate the model on what needs to run on CPU or accelerator.
   @jtu.skip_on_devices("gpu", "tpu")
-  def test_tf_mix_jax_with_uncompileable(self):
-    """Show how to combine TF-uncompileable code with compiled JAX-converted code."""
+  def test_tf_mix_jax_with_uncompilableble(self):
+    """Show how to combine TF-uncompilableble code with compiled JAX-converted code."""
     def tf_fn(x_str, compute_tf_fn=lambda x: x):
       # Some TF preprocessing code that cannot be compiled with XLA because it
       # uses strings.
@@ -271,13 +316,13 @@ class SavedModelTest(tf_test_util.JaxToTfTestCase):
     with self.assertRaisesRegex(
         Exception,
         "Detected unsupported operations when trying to compile graph"):
-      tf.function(tf_fn, jit_compile=True)(x_str)
+      tf.function(tf_fn, jit_compile=True, autograph=False)(x_str)
 
     # Plug in the TF-compiled JAX-converted `compute_jax_fn`.
     composed_fn = lambda x_str: tf_fn(
         x_str,
         compute_tf_fn=tf.function(jax2tf.convert(jnp.sin),
-                                  autograph=True,
+                                  autograph=False,
                                   jit_compile=True))
     res_tf = composed_fn(x_str)
     self.assertAllClose(res_tf.numpy(),

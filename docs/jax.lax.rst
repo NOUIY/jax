@@ -1,5 +1,5 @@
-jax.lax package
-===============
+``jax.lax`` module
+==================
 
 .. automodule:: jax.lax
 
@@ -24,29 +24,38 @@ Operators
   :toctree: _autosummary
 
     abs
-    add
     acos
+    acosh
+    add
+    after_all
+    approx_max_k
+    approx_min_k
     argmax
     argmin
     asin
+    asinh
     atan
     atan2
+    atanh
     batch_matmul
     bessel_i0e
     bessel_i1e
     betainc
     bitcast_convert_type
-    bitwise_not
     bitwise_and
+    bitwise_not
     bitwise_or
     bitwise_xor
     population_count
     broadcast
-    broadcasted_iota
     broadcast_in_dim
+    broadcast_shapes
+    broadcast_to_rank
+    broadcasted_iota
     cbrt
     ceil
     clamp
+    clz
     collapse
     complex
     concatenate
@@ -57,10 +66,11 @@ Operators
     conv_general_dilated
     conv_general_dilated_local
     conv_general_dilated_patches
-    conv_with_general_padding
     conv_transpose
+    conv_with_general_padding
     cos
     cosh
+    cumlogsumexp
     cummax
     cummin
     cumprod
@@ -72,14 +82,15 @@ Operators
     dynamic_index_in_dim
     dynamic_slice
     dynamic_slice_in_dim
-    dynamic_update_slice
     dynamic_update_index_in_dim
+    dynamic_update_slice
     dynamic_update_slice_in_dim
     eq
     erf
     erfc
     erf_inv
     exp
+    exp2
     expand_dims
     expm1
     fft
@@ -94,55 +105,74 @@ Operators
     imag
     index_in_dim
     index_take
+    integer_pow
     iota
     is_finite
     le
-    lt
     lgamma
     log
     log1p
+    logistic
+    lt
     max
     min
     mul
     ne
     neg
     nextafter
+    optimization_barrier
     pad
+    platform_dependent
+    polygamma
+    population_count
     pow
+    random_gamma_grad
     real
     reciprocal
     reduce
+    reduce_and
+    reduce_max
+    reduce_min
+    reduce_or
     reduce_precision
+    reduce_prod
+    reduce_sum
     reduce_window
-    reshape
+    reduce_xor
     rem
+    reshape
     rev
+    rng_bit_generator
+    rng_uniform
     round
     rsqrt
     scatter
     scatter_add
+    scatter_apply
     scatter_max
     scatter_min
     scatter_mul
-    select
     shift_left
     shift_right_arithmetic
     shift_right_logical
-    slice
-    slice_in_dim
     sign
     sin
     sinh
+    slice
+    slice_in_dim
     sort
     sort_key_val
+    split
     sqrt
     square
     squeeze
     sub
     tan
-    tie_in
+    tanh
     top_k
     transpose
+    zeros_like_array
+    zeta
 
 .. _lax-control-flow:
 
@@ -157,6 +187,8 @@ Control flow operators
     fori_loop
     map
     scan
+    select
+    select_n
     switch
     while_loop
 
@@ -175,14 +207,13 @@ Custom gradient operators
 Parallel operators
 ------------------
 
-Parallelism support is experimental.
-
 .. autosummary::
   :toctree: _autosummary
 
     all_gather
     all_to_all
     psum
+    psum_scatter
     pmax
     pmin
     pmean
@@ -190,6 +221,13 @@ Parallelism support is experimental.
     pshuffle
     pswapaxes
     axis_index
+
+Sharding-related operators
+--------------------------
+.. autosummary::
+  :toctree: _autosummary
+
+    with_sharding_constraint
 
 Linear algebra operators (jax.lax.linalg)
 -----------------------------------------
@@ -200,13 +238,23 @@ Linear algebra operators (jax.lax.linalg)
   :toctree: _autosummary
 
     cholesky
+    cholesky_update
     eig
     eigh
+    hessenberg
+    householder_product
     lu
+    lu_pivots_to_permutation
     qdwh
     qr
+    schur
     svd
+    SvdAlgorithm
+    symmetric_product
     triangular_solve
+    tridiagonal
+    tridiagonal_solve
+
 
 Argument classes
 ----------------
@@ -215,8 +263,21 @@ Argument classes
 
 .. autoclass:: ConvDimensionNumbers
 .. autoclass:: ConvGeneralDilatedDimensionNumbers
+.. autoclass:: DotAlgorithm
+.. autoclass:: DotAlgorithmPreset
+   :members:
+   :undoc-members:
+   :member-order: bysource
+.. autoclass:: FftType
+  :members:
 .. autoclass:: GatherDimensionNumbers
 .. autoclass:: GatherScatterMode
 .. autoclass:: Precision
+.. autoclass:: PrecisionLike
+.. autoclass:: RandomAlgorithm
+  :members:
+  :member-order: bysource
 .. autoclass:: RoundingMethod
+  :members:
+  :member-order: bysource
 .. autoclass:: ScatterDimensionNumbers

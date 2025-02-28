@@ -1,5 +1,5 @@
 # ---
-# Copyright 2021 Google LLC
+# Copyright 2021 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,16 +20,18 @@
 #       extension: .py
 #       format_name: light
 #       format_version: '1.5'
-#       jupytext_version: 1.13.6
+#       jupytext_version: 1.16.4
 #   kernelspec:
 #     display_name: Python 3
 #     name: python3
 # ---
 
 # [![Open in
-# Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/google/jax/blob/main/docs/autodidax.ipynb)
+# Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/jax-ml/jax/blob/main/docs/autodidax.ipynb)
 
 # # Autodidax: JAX core from scratch
+#
+# <!--* freshness: { reviewed: '2024-04-08' } *-->
 #
 # Ever want to learn how JAX works, but the implementation seemed impenetrable?
 # Well, you're in luck! By reading this tutorial, you'll learn every big idea in
@@ -92,11 +94,16 @@ def mul(x, y): return bind1(mul_p, x, y)
 def neg(x): return bind1(neg_p, x)
 def sin(x): return bind1(sin_p, x)
 def cos(x): return bind1(cos_p, x)
-def reduce_sum(x, axis=None): return bind1(reduce_sum_p, x, axis=axis)
 def greater(x, y): return bind1(greater_p, x, y)
 def less(x, y): return bind1(less_p, x, y)
 def transpose(x, perm): return bind1(transpose_p, x, perm=perm)
 def broadcast(x, shape, axes): return bind1(broadcast_p, x, shape=shape, axes=axes)
+def reduce_sum(x, axis=None):
+  if axis is None:
+    axis = tuple(range(np.ndim(x)))
+  if type(axis) is int:
+    axis = (axis,)
+  return bind1(reduce_sum_p, x, axis=axis)
 
 def bind1(prim, *args, **params):
   out, = bind(prim, *args, **params)
@@ -116,7 +123,7 @@ def bind1(prim, *args, **params):
 # around calls to `bind`. These wrappers let us control how arguments are passed
 # to `bind`, and in particular we follow a handy internal convention: when we
 # call `bind`, we pass values representing array data as positional arguments,
-# and we pass metadata like the `axis` argument to `sum_p` via keyword. This
+# and we pass metadata like the `axis` argument to `reduce_sum_p` via keyword. This
 # calling convention simplifies some core logic (since e.g. instances of the
 # `Tracer` class to be defined below can only occur in positional arguments to
 # `bind`). The wrappers can also provide docstrings!
@@ -129,19 +136,20 @@ def bind1(prim, *args, **params):
 # more descriptive.
 
 # +
+from collections.abc import Sequence
 from contextlib import contextmanager
-from typing import Type, List, Tuple, Sequence, Optional, Any
+from typing import Any
 
 class MainTrace(NamedTuple):
   level: int
-  trace_type: Type['Trace']
-  global_data: Optional[Any]
+  trace_type: type['Trace']
+  global_data: Any | None
 
-trace_stack: List[MainTrace] = []
-dynamic_trace: Optional[MainTrace] = None  # to be employed in Part 3
+trace_stack: list[MainTrace] = []
+dynamic_trace: MainTrace | None = None  # to be employed in Part 3
 
 @contextmanager
-def new_main(trace_type: Type['Trace'], global_data=None):
+def new_main(trace_type: type['Trace'], global_data=None):
   level = len(trace_stack)
   main = MainTrace(level, trace_type, global_data)
   trace_stack.append(main)
@@ -237,7 +245,7 @@ def swap(f): return lambda x, y: f(y, x)
 # +
 class ShapedArray:
   array_abstraction_level = 1
-  shape: Tuple[int]
+  shape: tuple[int, ...]
   dtype: np.dtype
 
   def __init__(self, shape, dtype):
@@ -439,8 +447,6 @@ def f(x):
   return z
 
 print(f(3.0))
-
-
 # -
 
 # Woo! Like going around in a big circle. But the point of this indirection is
@@ -451,6 +457,8 @@ print(f(3.0))
 # First, a few helper functions:
 
 # +
+import builtins
+
 def zeros_like(val):
   aval = get_aval(val)
   return np.zeros(aval.shape, aval.dtype)
@@ -462,17 +470,15 @@ def unzip2(pairs):
     lst2.append(x2)
   return lst1, lst2
 
-map_ = map
 def map(f, *xs):
-  return list(map_(f, *xs))
+  return list(builtins.map(f, *xs))
 
-zip_ = zip
 def zip(*args):
   fst, *rest = args = map(list, args)
   n = len(fst)
   for arg in rest:
     assert len(arg) == n
-  return list(zip_(*args))
+  return list(builtins.zip(*args))
 
 
 # -
@@ -689,19 +695,20 @@ class Store:
 
 
 # + tags=["hide-input"]
+from collections.abc import Hashable, Iterable, Iterator
 import itertools as it
-from typing import Callable, Type, Hashable, Dict, Iterable, Iterator
+from collections.abc import Callable
 
 class NodeType(NamedTuple):
   name: str
   to_iterable: Callable
   from_iterable: Callable
 
-def register_pytree_node(ty: Type, to_iter: Callable, from_iter: Callable
+def register_pytree_node(ty: type, to_iter: Callable, from_iter: Callable
                          ) -> None:
   node_types[ty] = NodeType(str(ty), to_iter, from_iter)
 
-node_types: Dict[Type, NodeType] = {}
+node_types: dict[type, NodeType] = {}
 register_pytree_node(tuple, lambda t: (None, t), lambda _, xs: tuple(xs))
 register_pytree_node(list,  lambda l: (None, l), lambda _, xs:  list(xs))
 register_pytree_node(dict,
@@ -711,16 +718,16 @@ register_pytree_node(dict,
 class PyTreeDef(NamedTuple):
   node_type: NodeType
   node_metadata: Hashable
-  child_treedefs: Tuple['PyTreeDef']
+  child_treedefs: tuple['PyTreeDef', ...]
 
 class Leaf: pass
 leaf = Leaf()
 
-def tree_flatten(x: Any) -> Tuple[List[Any], PyTreeDef]:
+def tree_flatten(x: Any) -> tuple[list[Any], PyTreeDef]:
   children_iter, treedef = _tree_flatten(x)
   return list(children_iter), treedef
 
-def _tree_flatten(x: Any) -> Tuple[Iterable, PyTreeDef]:
+def _tree_flatten(x: Any) -> tuple[Iterable, PyTreeDef]:
   node_type = node_types.get(type(x))
   if node_type:
     node_metadata, children = node_type.to_iterable(x)
@@ -730,7 +737,7 @@ def _tree_flatten(x: Any) -> Tuple[Iterable, PyTreeDef]:
   else:
     return [x], leaf
 
-def tree_unflatten(treedef: PyTreeDef, xs: List[Any]) -> Any:
+def tree_unflatten(treedef: PyTreeDef, xs: list[Any]) -> Any:
   return _tree_unflatten(treedef, iter(xs))
 
 def _tree_unflatten(treedef: PyTreeDef, xs: Iterator) -> Any:
@@ -873,8 +880,8 @@ vmap_rules[neg_p] = partial(vectorized_unop_batching_rule, neg)
 
 def reduce_sum_batching_rule(axis_size, vals_in, dims_in, *, axis):
   (x,), (x_bdim,) = vals_in, dims_in
-  new_axis = axis + (x_bdim <= axis)
-  out_bdim = x_bdim - (new_axis < x_bdim)
+  new_axis = tuple(ax + (x_bdim <= ax) for ax in axis)
+  out_bdim = x_bdim - sum(ax < x_bdim for ax in axis)
   return [reduce_sum(x, new_axis)], [out_bdim]
 vmap_rules[reduce_sum_p] = reduce_sum_batching_rule
 
@@ -931,6 +938,8 @@ def f(x):
   return sin(x)
 
 jacfwd(f, np.arange(3.))
+
+
 # -
 
 # That's it for `jvp` and `vmap`!
@@ -991,8 +1000,6 @@ jacfwd(f, np.arange(3.))
 # structs:
 
 # +
-from typing import Set
-
 class Var:
   aval: ShapedArray
   def __init__(self, aval): self.aval = aval
@@ -1009,14 +1016,14 @@ Atom = Union[Var, Lit]
 
 class JaxprEqn(NamedTuple):
   primitive: Primitive
-  inputs: List[Atom]
-  params: Dict[str, Any]
-  out_binders: List[Var]
+  inputs: list[Atom]
+  params: dict[str, Any]
+  out_binders: list[Var]
 
 class Jaxpr(NamedTuple):
-  in_binders: List[Var]
-  eqns: List[JaxprEqn]
-  outs: List[Atom]
+  in_binders: list[Var]
+  eqns: list[JaxprEqn]
+  outs: list[Atom]
 
   def __hash__(self): return id(self)
   __eq__ = op.is_
@@ -1033,8 +1040,8 @@ def raise_to_shaped(aval):
 
 # +
 class JaxprType(NamedTuple):
-  in_types:  List[ShapedArray]
-  out_types: List[ShapedArray]
+  in_types:  list[ShapedArray]
+  out_types: list[ShapedArray]
 
   def __repr__(self):
     in_types = ', '.join(aval.str_short() for aval in self.in_types)
@@ -1042,7 +1049,7 @@ class JaxprType(NamedTuple):
     return f'({in_types}) -> ({out_types})'
 
 def typecheck_jaxpr(jaxpr: Jaxpr) -> JaxprType:
-  env: Set[Var] = set()
+  env: set[Var] = set()
 
   for v in jaxpr.in_binders:
     if v in env: raise TypeError
@@ -1061,7 +1068,7 @@ def typecheck_jaxpr(jaxpr: Jaxpr) -> JaxprType:
   out_types = [typecheck_atom(env, x) for x in jaxpr.outs]
   return JaxprType(in_types, out_types)
 
-def typecheck_atom(env: Set[Var], x: Atom) -> ShapedArray:
+def typecheck_atom(env: set[Var], x: Atom) -> ShapedArray:
   if isinstance(x, Var):
     if x not in env: raise TypeError("unbound variable")
     return x.aval
@@ -1077,8 +1084,8 @@ def typecheck_atom(env: Set[Var], x: Atom) -> ShapedArray:
 # interpreter.
 
 # +
-def eval_jaxpr(jaxpr: Jaxpr, args: List[Any]) -> List[Any]:
-  env: Dict[Var, Any] = {}
+def eval_jaxpr(jaxpr: Jaxpr, args: list[Any]) -> list[Any]:
+  env: dict[Var, Any] = {}
 
   def read(x: Atom) -> Any:
     return env[x] if type(x) is Var else x.val
@@ -1111,11 +1118,11 @@ def jaxpr_as_fun(jaxpr: Jaxpr):
 # `lax.while_loop`, and `lax.scan`.
 
 # +
-def split_list(lst: List[Any], n: int) -> Tuple[List[Any], List[Any]]:
+def split_list(lst: list[Any], n: int) -> tuple[list[Any], list[Any]]:
   assert 0 <= n <= len(lst)
   return lst[:n], lst[n:]
 
-def partition_list(bs: List[bool], l: List[Any]) -> Tuple[List[Any], List[Any]]:
+def partition_list(bs: list[bool], l: list[Any]) -> tuple[list[Any], list[Any]]:
   assert len(bs) == len(l)
   lists = lst1, lst2 = [], []
   for b, x in zip(bs, l):
@@ -1172,11 +1179,11 @@ abstract_eval_rules = {}
 # track of variables, constants, and eqns as we build up the jaxpr.
 
 class JaxprBuilder:
-  eqns: List[JaxprEqn]
-  tracer_to_var: Dict[int, Var]
-  const_tracers: Dict[int, JaxprTracer]
-  constvals: Dict[Var, Any]
-  tracers: List[JaxprTracer]
+  eqns: list[JaxprEqn]
+  tracer_to_var: dict[int, Var]
+  const_tracers: dict[int, JaxprTracer]
+  constvals: dict[Var, Any]
+  tracers: list[JaxprTracer]
 
   def __init__(self):
     self.eqns = []
@@ -1209,8 +1216,8 @@ class JaxprBuilder:
     self.constvals[var] = val
     return var
 
-  def build(self, in_tracers: List[JaxprTracer], out_tracers: List[JaxprTracer]
-            ) -> Tuple[Jaxpr, List[Any]]:
+  def build(self, in_tracers: list[JaxprTracer], out_tracers: list[JaxprTracer]
+            ) -> tuple[Jaxpr, list[Any]]:
     constvars, constvals = unzip2(self.constvals.items())
     t2v = lambda t: self.tracer_to_var[id(t)]
     in_binders = constvars + [t2v(t) for t in in_tracers]
@@ -1221,7 +1228,7 @@ class JaxprBuilder:
     return jaxpr, constvals
 
 
-def _inline_literals(jaxpr: Jaxpr, consts: List[Any]) -> Tuple[Jaxpr, List[Any]]:
+def _inline_literals(jaxpr: Jaxpr, consts: list[Any]) -> tuple[Jaxpr, list[Any]]:
   const_binders, other_binders = split_list(jaxpr.in_binders, len(consts))
   scalars = [type(x) in jax_types and not get_aval(x).shape for x in consts]
   new_const_binders, lit_binders = partition_list(scalars, const_binders)
@@ -1247,7 +1254,7 @@ def _inline_literals(jaxpr: Jaxpr, consts: List[Any]) -> Tuple[Jaxpr, List[Any]]
 # generality is useful.
 
 # +
-def binop_abstract_eval(x: ShapedArray, y: ShapedArray) -> List[ShapedArray]:
+def binop_abstract_eval(x: ShapedArray, y: ShapedArray) -> list[ShapedArray]:
   if not isinstance(x, ShapedArray) or not isinstance(y, ShapedArray):
     raise TypeError
   if raise_to_shaped(x) != raise_to_shaped(y): raise TypeError
@@ -1256,7 +1263,7 @@ def binop_abstract_eval(x: ShapedArray, y: ShapedArray) -> List[ShapedArray]:
 abstract_eval_rules[add_p] = binop_abstract_eval
 abstract_eval_rules[mul_p] = binop_abstract_eval
 
-def compare_abstract_eval(x: ShapedArray, y: ShapedArray) -> List[ShapedArray]:
+def compare_abstract_eval(x: ShapedArray, y: ShapedArray) -> list[ShapedArray]:
   if not isinstance(x, ShapedArray) or not isinstance(y, ShapedArray):
     raise TypeError
   if x.shape != y.shape: raise TypeError
@@ -1264,20 +1271,22 @@ def compare_abstract_eval(x: ShapedArray, y: ShapedArray) -> List[ShapedArray]:
 abstract_eval_rules[greater_p] = compare_abstract_eval
 abstract_eval_rules[less_p] = compare_abstract_eval
 
-def vectorized_unop_abstract_eval(x: ShapedArray) -> List[ShapedArray]:
+def vectorized_unop_abstract_eval(x: ShapedArray) -> list[ShapedArray]:
   return [ShapedArray(x.shape, x.dtype)]
 
 abstract_eval_rules[sin_p] = vectorized_unop_abstract_eval
 abstract_eval_rules[cos_p] = vectorized_unop_abstract_eval
 abstract_eval_rules[neg_p] = vectorized_unop_abstract_eval
 
-def reduce_sum_abstract_eval(x: ShapedArray, *, axis: int) -> List[ShapedArray]:
-  new_shape = [d for i, d in enumerate(x.shape) if i != axis]
+def reduce_sum_abstract_eval(x: ShapedArray, *, axis: tuple[int, ...]
+                             ) -> list[ShapedArray]:
+  axis_ = set(axis)
+  new_shape = [d for i, d in enumerate(x.shape) if i not in axis_]
   return [ShapedArray(tuple(new_shape), x.dtype)]
 abstract_eval_rules[reduce_sum_p] = reduce_sum_abstract_eval
 
 def broadcast_abstract_eval(x: ShapedArray, *, shape: Sequence[int],
-                            axes: Sequence[int]) -> List[ShapedArray]:
+                            axes: Sequence[int]) -> list[ShapedArray]:
   return [ShapedArray(tuple(shape), x.dtype)]
 abstract_eval_rules[broadcast_p] = broadcast_abstract_eval
 # -
@@ -1288,7 +1297,7 @@ abstract_eval_rules[broadcast_p] = broadcast_abstract_eval
 # +
 from functools import lru_cache
 
-@lru_cache()  # ShapedArrays are hashable
+@lru_cache  # ShapedArrays are hashable
 def make_jaxpr_v1(f, *avals_in):
   avals_in, in_tree = tree_flatten(avals_in)
   f, out_tree = flatten_fun(f, in_tree)
@@ -1304,12 +1313,11 @@ def make_jaxpr_v1(f, *avals_in):
 
 
 # + tags=["hide-input"]
-from typing import DefaultDict
 from collections import defaultdict
 import string
 
 class PPrint:
-  lines: List[Tuple[int, str]]
+  lines: list[tuple[int, str]]
 
   def __init__(self, lines):
     self.lines = lines
@@ -1336,7 +1344,7 @@ class PPrint:
 def pp(s: Any) -> PPrint:
   return PPrint([(0, line) for line in str(s).splitlines()])
 
-def vcat(ps: List[PPrint]) -> PPrint:
+def vcat(ps: list[PPrint]) -> PPrint:
   return sum(ps, pp(''))
 
 def pp_jaxpr(jaxpr: Jaxpr) -> PPrint:
@@ -1350,10 +1358,10 @@ def pp_jaxpr(jaxpr: Jaxpr) -> PPrint:
   return (pp(f'{{ lambda {in_binders} .') +
           ((pp('let ') >> eqns) + pp(f'in ( {outs} ) }}')).indent(2))
 
-def var_str(names: DefaultDict[Var, str], v: Var) -> str:
+def var_str(names: defaultdict[Var, str], v: Var) -> str:
   return f'{names[v]}:{v.aval.str_short()}'
 
-def pp_eqn(names: DefaultDict[Var, str], eqn: JaxprEqn) -> PPrint:
+def pp_eqn(names: defaultdict[Var, str], eqn: JaxprEqn) -> PPrint:
   rule = pp_rules.get(eqn.primitive)
   if rule:
     return rule(names, eqn)
@@ -1364,7 +1372,7 @@ def pp_eqn(names: DefaultDict[Var, str], eqn: JaxprEqn) -> PPrint:
                        for x in eqn.inputs)))
     return lhs >> pp(' = ') >> rhs
 
-def pp_params(params: Dict[str, Any]) -> PPrint:
+def pp_params(params: dict[str, Any]) -> PPrint:
   items = sorted(params.items())
   if items:
     return pp(' [ ') >> vcat([pp(f'{k}={v}') for k, v in items]) >> pp(' ] ')
@@ -1372,7 +1380,7 @@ def pp_params(params: Dict[str, Any]) -> PPrint:
     return pp(' ')
 
 Jaxpr.__repr__ = lambda self: str(pp_jaxpr(self))
-pp_rules: Dict[Primitive, Callable[..., PPrint]] = {}
+pp_rules: dict[Primitive, Callable[..., PPrint]] = {}
 # -
 
 jaxpr, consts, _ = make_jaxpr_v1(lambda x: 2. * x, raise_to_shaped(get_aval(3.)))
@@ -1388,7 +1396,7 @@ print(jaxpr)
 
 
 # This is precisely the issue that
-# [omnistaging](https://github.com/google/jax/pull/3370) fixed.
+# [omnistaging](https://github.com/jax-ml/jax/pull/3370) fixed.
 # We want to ensure that the `JaxprTrace` started by `make_jaxpr` is always
 # applied, regardless of whether any inputs to `bind` are boxed in corresponding
 # `JaxprTracer` instances. We can achieve this by employing the `dynamic_trace`
@@ -1404,9 +1412,9 @@ def new_dynamic(main: MainTrace):
   finally:
     dynamic_trace = prev_dynamic_trace
 
-@lru_cache()
+@lru_cache
 def make_jaxpr(f: Callable, *avals_in: ShapedArray,
-               ) -> Tuple[Jaxpr, List[Any], PyTreeDef]:
+               ) -> tuple[Jaxpr, list[Any], PyTreeDef]:
   avals_in, in_tree = tree_flatten(avals_in)
   f, out_tree = flatten_fun(f, in_tree)
 
@@ -1511,7 +1519,7 @@ xla_call_p = Primitive('xla_call')
 
 # With any new primitive, we need to give it transformation rules, starting with
 # its evaluation rule. When we evaluate an application of the `xla_call`
-# primitive, we want to stage out out the computation to XLA. That involves
+# primitive, we want to stage out the computation to XLA. That involves
 # translating the jaxpr to an XLA HLO program, transferring the argument values
 # to the XLA device, executing the XLA program, and transferring back the
 # results. We'll cache the XLA HLO compilation so that for each `jit`ted
@@ -1536,10 +1544,15 @@ class IDHashable:
 # Next, we'll define the evaluation rule for `xla_call`:
 
 # +
-from jax._src.lib import xla_bridge as xb
-from jax._src.lib import xla_client as xc
-xe = xc._xla
-xops = xc._xla.ops
+import io
+from jax.extend.mlir import ir
+from jax.extend.mlir.dialects import func
+from jax.extend.mlir.dialects import stablehlo as hlo
+from jax._src import xla_bridge as xb
+
+class MlirContext(NamedTuple):
+  module: ir.Module
+  symbol_table: ir.SymbolTable
 
 def xla_call_impl(*args, jaxpr: Jaxpr, num_consts: int):
   consts, args = args[:num_consts], args[num_consts:]
@@ -1548,31 +1561,55 @@ def xla_call_impl(*args, jaxpr: Jaxpr, num_consts: int):
   return execute(*args)
 impl_rules[xla_call_p] = xla_call_impl
 
-@lru_cache()
-def xla_callable(hashable_jaxpr: IDHashable, hashable_consts: Tuple[IDHashable]):
+@lru_cache
+def xla_callable(hashable_jaxpr: IDHashable,
+                 hashable_consts: tuple[IDHashable, ...]):
   jaxpr: Jaxpr = hashable_jaxpr.val
   typecheck_jaxpr(jaxpr)
   consts = [x.val for x in hashable_consts]
   in_avals = [v.aval for v in jaxpr.in_binders[len(consts):]]
-  c = xc.XlaBuilder('xla_call')
-  xla_consts = _xla_consts(c, consts)
-  xla_params = _xla_params(c, in_avals)
-  outs = jaxpr_subcomp(c, jaxpr, xla_consts + xla_params)
-  out = xops.Tuple(c, outs)
-  compiled = xb.get_backend(None).compile(c.build(out))
+
+  with ir.Context() as ctx, ir.Location.unknown(ctx):
+    hlo.register_dialect(ctx)
+    m = ir.Module.create()
+    c = MlirContext(m, ir.SymbolTable(m.operation))
+
+    with ir.InsertionPoint(c.module.body):
+      @func.func(*(aval_to_ir_type(aval) for aval in in_avals))
+      def main(*params):
+        return jaxpr_subcomp(c, jaxpr, _hlo_consts(consts) + params)
+
+  output = io.StringIO()
+  c.module.operation.print(file=output)
+  compiled = xb.get_backend(None).compile(output.getvalue())
   return partial(execute_compiled, compiled, [v.aval for v in jaxpr.outs])
 
-def _xla_consts(c: xe.XlaBuilder, consts: List[Any]) -> List[xe.XlaOp]:
+def _mlir_dtype(dtype: np.dtype) -> ir.Type:
+  if np.issubdtype(dtype, np.signedinteger):
+    return ir.IntegerType.get_signless(np.iinfo(dtype).bits)
+  elif dtype == np.float32:
+    return ir.F32Type.get()
+  elif dtype == np.float64:
+    return ir.F64Type.get()
+  else:
+    raise NotImplementedError("MLIR conversion not implemented for ", dtype)
+
+def aval_to_ir_type(aval: ShapedArray) -> ir.Type:
+  return ir.RankedTensorType.get(aval.shape, _mlir_dtype(aval.dtype))
+
+def _hlo_const(x: Any) -> ir.Value:
+  a = np.asarray(x)
+  if a.dtype == np.bool_:
+    return hlo.constant(ir.DenseElementsAttr.get(
+      np.packbits(a, bitorder='little'), type=ir.IntegerType.get_signless(1),
+      shape=a.shape))
+  else:
+    return hlo.constant(ir.DenseElementsAttr.get(a))
+
+def _hlo_consts(consts: list[Any]) -> list[ir.Value]:
   unique_consts = {id(cnst): cnst for cnst in consts}
-  xla_consts = {
-      id_: xops.ConstantLiteral(c, cnst) for id_, cnst in unique_consts.items()}
-  return [xla_consts[id(cnst)] for cnst in consts]
-
-def _xla_params(c: xe.XlaBuilder, avals_in: List[ShapedArray]) -> List[xe.XlaOp]:
-  return [xops.Parameter(c, i, _xla_shape(a)) for i, a in enumerate(avals_in)]
-
-def _xla_shape(aval: ShapedArray) -> xe.Shape:
-  return xc.Shape.array_shape(xc.dtype_to_etype(aval.dtype), aval.shape)
+  ir_consts = {id_: _hlo_const(cnst) for id_, cnst in unique_consts.items()}
+  return tuple(ir_consts[id(cnst)] for cnst in consts)
 
 
 # -
@@ -1582,23 +1619,25 @@ def _xla_shape(aval: ShapedArray) -> xe.Shape:
 # compiled program:
 
 # +
-def jaxpr_subcomp(c: xe.XlaBuilder, jaxpr: Jaxpr, args: List[xe.XlaOp]
-                  ) -> xe.XlaOp:
-  env: Dict[Var, xe.XlaOp] = {}
+def jaxpr_subcomp(c: MlirContext, jaxpr: Jaxpr, args: list[ir.Value]) -> list[ir.Value]:
+  env: dict[Var, ir.Value] = {}
 
-  def read(x: Atom) -> xe.XlaOp:
-    return env[x] if type(x) is Var else xops.Constant(c, np.asarray(x.val))
+  def read(x: Atom) -> ir.Value:
+    return env[x] if type(x) is Var else _hlo_const(np.asarray(x.val))
 
-  def write(v: Var, val: xe.XlaOp) -> None:
+  def write(v: Var, val: ir.Value) -> None:
     env[v] = val
 
   map(write, jaxpr.in_binders, args)
   for eqn in jaxpr.eqns:
     in_avals = [x.aval for x in eqn.inputs]
     in_vals = map(read, eqn.inputs)
-    rule = xla_translations[eqn.primitive]
-    out_vals = rule(c, in_avals, in_vals, **eqn.params)
-    map(write, eqn.out_binders, out_vals)
+    out_avals = [x.aval for x in eqn.out_binders]
+    rule = hlo_translations[eqn.primitive]
+    assert all(isinstance(v, ir.Value) for v in in_vals), in_vals
+    out_vals = rule(c, in_avals, out_avals, in_vals, **eqn.params)
+    assert all(isinstance(v, ir.Value) for v in out_vals), out_vals
+    map(write, eqn.out_binders, out_vals), out_vals
   return map(read, jaxpr.outs)
 
 def execute_compiled(compiled, out_avals, *args):
@@ -1612,9 +1651,9 @@ input_handlers = {ty: default_input_handler for ty in
 
 def handle_result(aval: ShapedArray, buf):
   del aval  # Unused for now
-  return buf.to_py()
+  return np.asarray(buf)
 
-xla_translations = {}
+hlo_translations = {}
 
 
 # -
@@ -1625,32 +1664,43 @@ xla_translations = {}
 # primitive:
 
 # +
-def direct_translation(op, c, in_avals, in_vals):
-  del c, in_avals
+def direct_translation(op, c, in_avals, out_avals, in_vals):
+  del c, in_avals, out_avals
   return [op(*in_vals)]
 
-xla_translations[add_p] = partial(direct_translation, xops.Add)
-xla_translations[mul_p] = partial(direct_translation, xops.Mul)
-xla_translations[neg_p] = partial(direct_translation, xops.Neg)
-xla_translations[sin_p] = partial(direct_translation, xops.Sin)
-xla_translations[cos_p] = partial(direct_translation, xops.Cos)
-xla_translations[greater_p] = partial(direct_translation, xops.Gt)
-xla_translations[less_p] = partial(direct_translation, xops.Lt)
+hlo_translations[add_p] = partial(direct_translation, hlo.add)
+hlo_translations[mul_p] = partial(direct_translation, hlo.multiply)
+hlo_translations[neg_p] = partial(direct_translation, hlo.negate)
+hlo_translations[sin_p] = partial(direct_translation, hlo.sine)
+hlo_translations[cos_p] = partial(direct_translation, hlo.cosine)
 
-def reduce_sum_translation(c, in_avals, in_vals, *, axis):
-  (x_aval,), (x,) = in_avals, in_vals
-  zero = xops.ConstantLiteral(c, np.array(0, x_aval.dtype))
-  subc = xc.XlaBuilder('add')
-  shape = _xla_shape(ShapedArray((), x_aval.dtype))
-  xops.Add(xops.Parameter(subc, 0, shape), xops.Parameter(subc, 1, shape))
-  return [xops.Reduce(c, [x], [zero], subc.build(), [axis])]
-xla_translations[reduce_sum_p] = reduce_sum_translation
+def compare_translation(op, c, in_avals, out_avals, in_vals):
+  del c, out_avals
+  return [hlo.compare(*in_vals, hlo.ComparisonDirectionAttr.get(op))]
 
-def broadcast_translation(c, in_avals, in_vals, *, shape, axes):
-  x, = in_vals
+hlo_translations[greater_p] = partial(compare_translation, "GT")
+hlo_translations[less_p] = partial(compare_translation, "LT")
+
+def reduce_sum_translation(c, in_avals, out_avals, in_vals, *, axis):
+  del c
+  (x_aval,), (out_aval,), (x,) = in_avals, out_avals, in_vals
+  op = hlo.ReduceOp(
+    [aval_to_ir_type(out_aval)], [x], [_hlo_const(np.array(0, x_aval.dtype))],
+    axis)
+  scalar_type = aval_to_ir_type(ShapedArray((), x_aval.dtype))
+  reducer_region = op.body.blocks.append(scalar_type, scalar_type)
+  with ir.InsertionPoint(reducer_region):
+    hlo.return_([hlo.add(*reducer_region.arguments)])
+  return op.results
+
+hlo_translations[reduce_sum_p] = reduce_sum_translation
+
+def broadcast_translation(c, in_avals, out_avals, in_vals, *, shape, axes):
+  del c
+  (x,), (out_aval,) = in_vals, out_avals
   dims_complement = [i for i in range(len(shape)) if i not in axes]
-  return [xops.BroadcastInDim(x, shape, dims_complement)]
-xla_translations[broadcast_p] = broadcast_translation
+  return [hlo.broadcast_in_dim(aval_to_ir_type(out_aval), x, dims_complement)]
+hlo_translations[broadcast_p] = broadcast_translation
 
 
 # -
@@ -1718,8 +1768,8 @@ def xla_call_jvp_rule(primals, tangents, *, jaxpr, num_consts):
   return primals_out, tangents_out
 jvp_rules[xla_call_p] = xla_call_jvp_rule
 
-@lru_cache()
-def jvp_jaxpr(jaxpr: Jaxpr) -> Tuple[Jaxpr, List[Any]]:
+@lru_cache
+def jvp_jaxpr(jaxpr: Jaxpr) -> tuple[Jaxpr, list[Any]]:
   def jvp_traceable(*primals_and_tangents):
     n = len(primals_and_tangents) // 2
     primals, tangents = primals_and_tangents[:n], primals_and_tangents[n:]
@@ -1739,9 +1789,9 @@ def xla_call_vmap_rule(axis_size, vals_in, dims_in, *, jaxpr, num_consts):
   return outs, [0] * len(outs)
 vmap_rules[xla_call_p] = xla_call_vmap_rule
 
-@lru_cache()
-def vmap_jaxpr(jaxpr: Jaxpr, axis_size: int, bdims_in: Tuple[BatchAxis, ...]
-               ) -> Tuple[Jaxpr, List[Any]]:
+@lru_cache
+def vmap_jaxpr(jaxpr: Jaxpr, axis_size: int, bdims_in: tuple[BatchAxis, ...]
+               ) -> tuple[Jaxpr, list[Any]]:
   vmap_traceable = vmap(jaxpr_as_fun(jaxpr), tuple(bdims_in))
   in_avals = [unmapped_aval(axis_size, d, v.aval)
               for v, d in zip(jaxpr.in_binders, bdims_in)]
@@ -1767,19 +1817,16 @@ def xla_call_abstract_eval_rule(*in_types, jaxpr, num_consts):
   return jaxpr_type.out_types
 abstract_eval_rules[xla_call_p] = xla_call_abstract_eval_rule
 
-def xla_call_translation(c, in_avals, in_vals, *, jaxpr, num_consts):
-  del num_consts  # Only used at top-level.
+def xla_call_translation(c, in_avals, out_avals, in_vals, *, jaxpr, num_consts):
+  del num_consts, out_avals
   # Calling jaxpr_subcomp directly would inline. We generate a Call HLO instead.
-  subc = xc.XlaBuilder('inner xla_call')
-  xla_params = _xla_params(subc, in_avals)
-  outs = jaxpr_subcomp(subc, jaxpr, xla_params)
-  subc = subc.build(xops.Tuple(subc, outs))
-  return destructure_tuple(c, xops.Call(c, subc, in_vals))
-xla_translations[xla_call_p] = xla_call_translation
-
-def destructure_tuple(c, tup):
-  num_elements = len(c.get_shape(tup).tuple_shapes())
-  return [xops.GetTupleElement(tup, i) for i in range(num_elements)]
+  with ir.InsertionPoint(c.module.body):
+    @func.func(*(aval_to_ir_type(aval) for aval in in_avals))
+    def inner_xla_call(*params):
+      return jaxpr_subcomp(c, jaxpr, params)
+    name = c.symbol_table.insert(inner_xla_call.func_op)
+  return func.CallOp(inner_xla_call.func_op, in_vals).results
+hlo_translations[xla_call_p] = xla_call_translation
 
 
 # +
@@ -1805,15 +1852,15 @@ print(ys)
 # One piece missing is device memory persistence for arrays. That is, we've
 # defined `handle_result` to transfer results back to CPU memory as NumPy
 # arrays, but it's often preferable to avoid transferring results just to
-# transfer them back for the next operation. We can do that by introducing a
-# `DeviceArray` class, which can wrap XLA buffers and otherwise duck-type
+# transfer them back for the next operation. We can do that by introducing an
+# `Array` class, which can wrap XLA buffers and otherwise duck-type
 # `numpy.ndarray`s:
 
 # +
 def handle_result(aval: ShapedArray, buf):  # noqa: F811
-  return DeviceArray(aval, buf)
+  return Array(aval, buf)
 
-class DeviceArray:
+class Array:
   buf: Any
   aval: ShapedArray
 
@@ -1825,9 +1872,9 @@ class DeviceArray:
   shape = property(lambda self: self.aval.shape)
   ndim  = property(lambda self: self.aval.ndim)
 
-  def __array__(self): return self.buf.to_py()
-  def __repr__(self):  return repr(self.buf.to_py())
-  def __str__(self):   return str(self.buf.to_py())
+  def __array__(self): return np.asarray(self.buf)
+  def __repr__(self):  return repr(np.asarray(self.buf))
+  def __str__(self):   return str(np.asarray(self.buf))
 
   _neg = staticmethod(neg)
   _add = staticmethod(add)
@@ -1836,9 +1883,9 @@ class DeviceArray:
   _rmul = staticmethod(mul)
   _gt = staticmethod(greater)
   _lt = staticmethod(less)
-input_handlers[DeviceArray] = lambda x: x.buf
+input_handlers[Array] = lambda x: x.buf
 
-jax_types.add(DeviceArray)
+jax_types.add(Array)
 
 
 # +
@@ -1855,7 +1902,7 @@ print(ydot)
 
 
 # + tags=["hide-input"]
-def pprint_xla_call(names: DefaultDict[Var, str], eqn: JaxprEqn) -> PPrint:
+def pprint_xla_call(names: defaultdict[Var, str], eqn: JaxprEqn) -> PPrint:
   lhs = pp(' '.join(var_str(names, v) for v in eqn.out_binders))
   params_without_jaxpr = {k:v for k, v in eqn.params.items() if k != 'jaxpr'}
   rhs = (pp(eqn.primitive.name) >> pp_params(params_without_jaxpr) >>
@@ -1877,7 +1924,9 @@ pp_rules[xla_call_p] = pprint_xla_call
 # ### `linearize`
 #
 # In the case of `linearize`, we want to stage out the linear part of a `jvp`
-# computation. That is, if we have `jvp : (a -> b) -> (a, T a) -> (b, T b)`,
+# computation. That is, in terms of
+# [Haskell-like type signatures](https://wiki.haskell.org/Type_signature),
+# if we have `jvp : (a -> b) -> (a, T a) -> (b, T b)`,
 # then we write `linearize : (a -> b) -> a -> (b, T a -o T b)`, using `T a` to
 # mean "the tangent type of `a`" and using the "lollipop" `-o` rather than the
 # arrow `->` to indicate a _linear_ function. We define the semantics of
@@ -1917,11 +1966,11 @@ pp_rules[xla_call_p] = pprint_xla_call
 # First, some utilities:
 
 # +
-def split_half(lst: List[Any]) -> Tuple[List[Any], List[Any]]:
+def split_half(lst: list[Any]) -> tuple[list[Any], list[Any]]:
   assert not len(lst) % 2
   return split_list(lst, len(lst) // 2)
 
-def merge_lists(which: List[bool], l1: List[Any], l2: List[Any]) -> List[Any]:
+def merge_lists(which: list[bool], l1: list[Any], l2: list[Any]) -> list[Any]:
   l1, l2 = iter(l1), iter(l2)
   out = [next(l2) if b else next(l1) for b in which]
   assert next(l1, None) is next(l2, None) is None
@@ -2045,7 +2094,7 @@ def vspace(aval: ShapedArray) -> ShapedArray:
 
 class PartialVal(NamedTuple):
   aval: ShapedArray
-  const: Optional[Any]
+  const: Any | None
 
   @classmethod
   def known(cls, val: Any):
@@ -2063,8 +2112,8 @@ class PartialVal(NamedTuple):
 # return a list of `PartialVal` outputs along with a jaxpr representing the
 # delayed computation:
 
-def partial_eval_flat(f: Callable, pvals_in: List[PartialVal]
-                      ) -> Tuple[Jaxpr, List[PartialVal], List[Any]]:
+def partial_eval_flat(f: Callable, pvals_in: list[PartialVal]
+                      ) -> tuple[Jaxpr, list[PartialVal], list[Any]]:
   with new_main(PartialEvalTrace) as main:
     trace = PartialEvalTrace(main)
     tracers_in = [trace.new_arg(pval) for pval in pvals_in]
@@ -2097,10 +2146,10 @@ class ConstRecipe(NamedTuple):
 
 class JaxprEqnRecipe(NamedTuple):
   prim: Primitive
-  tracers_in: List['PartialEvalTracer']
-  params: Dict[str, Any]
-  avals_out: List[ShapedArray]
-  tracer_refs_out: List['ReferenceType[PartialEvalTracer]']
+  tracers_in: list['PartialEvalTracer']
+  params: dict[str, Any]
+  avals_out: list[ShapedArray]
+  tracer_refs_out: list['ReferenceType[PartialEvalTracer]']
 
 JaxprRecipe = Union[LambdaBindingRecipe, ConstRecipe, JaxprEqnRecipe]
 
@@ -2109,7 +2158,7 @@ JaxprRecipe = Union[LambdaBindingRecipe, ConstRecipe, JaxprEqnRecipe]
 
 class PartialEvalTracer(Tracer):
   pval: PartialVal
-  recipe: Optional[JaxprRecipe]
+  recipe: JaxprRecipe | None
 
   def __init__(self, trace, pval, recipe):
     self._trace = trace
@@ -2138,7 +2187,7 @@ class PartialEvalTracer(Tracer):
 # representing unknown outputs, we need avals, which we get from the abstract
 # eval rules. (Notice that tracers reference `JaxprEqnRecipe`s, and
 # `JaxprEqnRecipe`s reference tracers; we avoid circular garbage by using
-# weakrefs.)
+# `weakref`s.)
 #
 # That `process_primitive` logic applies to most primitives, but `xla_call_p`
 # requires recursive treatment. So we special-case its rule in a
@@ -2185,14 +2234,14 @@ partial_eval_rules = {}
 # The jaxpr corresponds to a topological sort of the graph.
 
 # +
-def tracers_to_jaxpr(tracers_in: List[PartialEvalTracer],
-                     tracers_out: List[PartialEvalTracer]):
-  tracer_to_var: Dict[int, Var] = {id(t): Var(raise_to_shaped(t.aval))
+def tracers_to_jaxpr(tracers_in: list[PartialEvalTracer],
+                     tracers_out: list[PartialEvalTracer]):
+  tracer_to_var: dict[int, Var] = {id(t): Var(raise_to_shaped(t.aval))
                                    for t in tracers_in}
-  constvar_to_val: Dict[int, Any] = {}
-  constid_to_var: Dict[int, Var] = {}
-  processed_eqns: Set[int] = set()
-  eqns: List[JaxprEqn] = []
+  constvar_to_val: dict[int, Any] = {}
+  constid_to_var: dict[int, Var] = {}
+  processed_eqns: set[int] = set()
+  eqns: list[JaxprEqn] = []
   for t in toposort(tracers_out, tracer_parents):
     if isinstance(t.recipe, LambdaBindingRecipe):
       assert id(t) in set(map(id, tracers_in))
@@ -2201,8 +2250,9 @@ def tracers_to_jaxpr(tracers_in: List[PartialEvalTracer],
       var = constid_to_var.get(id(val))
       if var is None:
         aval = raise_to_shaped(get_aval(val))
-        var = tracer_to_var[id(t)] = constid_to_var[id(val)] = Var(aval)
+        var = constid_to_var[id(val)] = Var(aval)
         constvar_to_val[var] = val
+      tracer_to_var[id(t)] = var
     elif isinstance(t.recipe, JaxprEqnRecipe):
       if id(t.recipe) not in processed_eqns:
         eqns.append(recipe_to_eqn(tracer_to_var, t.recipe))
@@ -2217,7 +2267,7 @@ def tracers_to_jaxpr(tracers_in: List[PartialEvalTracer],
   typecheck_jaxpr(jaxpr)
   return jaxpr, constvals
 
-def recipe_to_eqn(tracer_to_var: Dict[int, Var], recipe: JaxprEqnRecipe
+def recipe_to_eqn(tracer_to_var: dict[int, Var], recipe: JaxprEqnRecipe
                   ) -> JaxprEqn:
   inputs = [tracer_to_var[id(t)] for t in recipe.tracers_in]
   out_binders = [Var(aval) for aval in recipe.avals_out]
@@ -2225,12 +2275,12 @@ def recipe_to_eqn(tracer_to_var: Dict[int, Var], recipe: JaxprEqnRecipe
     if t_ref() is not None: tracer_to_var[id(t_ref())] = var
   return JaxprEqn(recipe.prim, inputs, recipe.params, out_binders)
 
-def tracer_parents(t: PartialEvalTracer) -> List[PartialEvalTracer]:
+def tracer_parents(t: PartialEvalTracer) -> list[PartialEvalTracer]:
   return t.recipe.tracers_in if isinstance(t.recipe, JaxprEqnRecipe) else []
 
 
 # + tags=["hide-input"]
-def toposort(out_nodes: List[Any], parents: Callable[[Any], List[Any]]):
+def toposort(out_nodes: list[Any], parents: Callable[[Any], list[Any]]):
   if not out_nodes: return []
   out_nodes = remove_duplicates(out_nodes)
 
@@ -2265,7 +2315,7 @@ def remove_duplicates(lst):
   seen = set()
   return [x for x in lst if id(x) not in seen and not seen.add(id(x))]
 
-def check_toposort(nodes: List[Any], parents: Callable[[Any], List[Any]]):
+def check_toposort(nodes: list[Any], parents: Callable[[Any], list[Any]]):
   seen = set()
   for node in nodes:
     assert all(id(parent) in seen for parent in parents(node))
@@ -2308,11 +2358,11 @@ def xla_call_partial_eval(trace, tracers, *, jaxpr, num_consts):
   return merge_lists(out_unknowns, outs1, outs2)
 partial_eval_rules[xla_call_p] = xla_call_partial_eval
 
-def partial_eval_jaxpr(jaxpr: Jaxpr, in_unknowns: List[bool],
-                       instantiate: Optional[List[bool]] = None,
-                       ) -> Tuple[Jaxpr, Jaxpr, List[bool], int]:
-  env: Dict[Var, bool] = {}
-  residuals: Set[Var] = set()
+def partial_eval_jaxpr(jaxpr: Jaxpr, in_unknowns: list[bool],
+                       instantiate: list[bool] | None = None,
+                       ) -> tuple[Jaxpr, Jaxpr, list[bool], int]:
+  env: dict[Var, bool] = {}
+  residuals: set[Var] = set()
 
   def read(x: Atom) -> bool:
     return type(x) is Var and env[x]
@@ -2378,8 +2428,8 @@ def typecheck_partial_eval_jaxpr(jaxpr, unks_in, unks_out, jaxpr1, jaxpr2):
 
 partial_eval_jaxpr_rules = {}
 
-def xla_call_peval_eqn(unks_in: List[bool], eqn: JaxprEqn,
-                       ) -> Tuple[JaxprEqn, JaxprEqn, List[bool], List[Var]]:
+def xla_call_peval_eqn(unks_in: list[bool], eqn: JaxprEqn,
+                       ) -> tuple[JaxprEqn, JaxprEqn, list[bool], list[Var]]:
   jaxpr = eqn.params['jaxpr']
   jaxpr1, jaxpr2, unks_out, num_res = partial_eval_jaxpr(jaxpr, unks_in)
   ins1, ins2 = partition_list(unks_in, eqn.inputs)
@@ -2504,10 +2554,10 @@ register_pytree_node(UndefPrimal,
 
 # +
 # NB: the analogous function in JAX is called 'backward_pass'
-def eval_jaxpr_transposed(jaxpr: Jaxpr, args: List[Any], cotangents: List[Any]
-                          ) -> List[Any]:
-  primal_env: Dict[Var, Any] = {}
-  ct_env: Dict[Var, Any] = {}
+def eval_jaxpr_transposed(jaxpr: Jaxpr, args: list[Any], cotangents: list[Any]
+                          ) -> list[Any]:
+  primal_env: dict[Var, Any] = {}
+  ct_env: dict[Var, Any] = {}
 
   def read_primal(x: Atom) -> Any:
     return primal_env.get(x, UndefPrimal(x.aval)) if type(x) is Var else x.val
@@ -2556,6 +2606,11 @@ def add_transpose_rule(cts, x, y):
   return [z_bar, z_bar]
 transpose_rules[add_p] = add_transpose_rule
 
+def reduce_sum_transpose_rule(cts, x, *, axis):
+  y_bar, = cts
+  return [broadcast(y_bar, x.aval.shape, axis)]
+transpose_rules[reduce_sum_p] = reduce_sum_transpose_rule
+
 def xla_call_transpose_rule(cts, *invals, jaxpr, num_consts):
   del num_consts  # Unused
   undef_primals = [type(x) is UndefPrimal for x in invals]
@@ -2567,9 +2622,9 @@ def xla_call_transpose_rule(cts, *invals, jaxpr, num_consts):
   return [next(outs) if undef else None for undef in undef_primals]
 transpose_rules[xla_call_p] = xla_call_transpose_rule
 
-@lru_cache()
-def transpose_jaxpr(jaxpr: Jaxpr, undef_primals: Tuple[bool, ...]
-                    ) -> Tuple[Jaxpr, List[Any]]:
+@lru_cache
+def transpose_jaxpr(jaxpr: Jaxpr, undef_primals: tuple[bool, ...]
+                    ) -> tuple[Jaxpr, list[Any]]:
   avals_in, avals_out = typecheck_jaxpr(jaxpr)
   traceable = partial(eval_jaxpr_transposed, jaxpr)
   args = [UndefPrimal(a) if u else a for a, u in zip(avals_in, undef_primals)]
@@ -2701,7 +2756,7 @@ def cond(pred, true_fn, false_fn, *operands):
 cond_p = Primitive('cond')
 
 def _join_jaxpr_consts(jaxpr1: Jaxpr, jaxpr2: Jaxpr, n1: int, n2: int
-                       ) -> Tuple[Jaxpr, Jaxpr]:
+                       ) -> tuple[Jaxpr, Jaxpr]:
   jaxpr1_type, jaxpr2_type = typecheck_jaxpr(jaxpr1), typecheck_jaxpr(jaxpr2)
   assert jaxpr1_type.in_types[n1:] == jaxpr2_type.in_types[n2:]
   consts1, rest1 = split_list(jaxpr1.in_binders, n1)
@@ -2827,28 +2882,18 @@ def cond_abstract_eval(pred_type, *in_types, true_jaxpr, false_jaxpr):
   return jaxpr_type.out_types
 abstract_eval_rules[cond_p] = cond_abstract_eval
 
-def cond_translation(c, in_avals, in_vals, *, true_jaxpr, false_jaxpr):
+def cond_translation(c, in_avals, out_avals, in_vals, *, true_jaxpr, false_jaxpr):
   del in_avals  # Unused
   pred, *in_vals = in_vals
-  flat_vals, in_tree = tree_flatten(in_vals)
-  operand = xops.Tuple(c, flat_vals)
-  operand_shape = c.get_shape(operand)
 
-  def make_comp(name: str, jaxpr: Jaxpr) -> xe.XlaComputation:
-    c = xc.XlaBuilder(name)
-    operand = xops.Parameter(c, 0, operand_shape)
-    operands = tree_unflatten(in_tree, destructure_tuple(c, operand))
-    outs = jaxpr_subcomp(c, jaxpr, operands)
-    return c.build(xops.Tuple(c, outs))
+  op = hlo.IfOp([aval_to_ir_type(aval) for aval in out_avals], pred)
+  with ir.InsertionPoint(op.true_branch.blocks.append()):
+    hlo.return_(jaxpr_subcomp(c, true_jaxpr, in_vals))
+  with ir.InsertionPoint(op.false_branch.blocks.append()):
+    hlo.return_(jaxpr_subcomp(c, false_jaxpr, in_vals))
+  return op.results
 
-  true_comp = make_comp('true_fn', true_jaxpr)
-  false_comp = make_comp('false_fn', false_jaxpr)
-
-  int_etype = xc.dtype_to_etype(np.dtype('int32'))
-  out = xops.Conditional(xops.ConvertElementType(pred, int_etype),
-                         [false_comp, true_comp], [operand] * 2)
-  return destructure_tuple(c, out)
-xla_translations[cond_p] = cond_translation
+hlo_translations[cond_p] = cond_translation
 # -
 
 out = jit(lambda: cond(False, lambda: 1, lambda: 2))()
@@ -2889,8 +2934,8 @@ def cond_partial_eval(trace, tracers, *, true_jaxpr, false_jaxpr):
   return merge_lists(out_uks, outs1, outs2)
 partial_eval_rules[cond_p] = cond_partial_eval
 
-def _cond_partial_eval(true_jaxpr: Jaxpr, false_jaxpr: Jaxpr, in_uks: List[bool]
-                       ) -> Tuple[Jaxpr, Jaxpr, Jaxpr, Jaxpr, List[bool], int]:
+def _cond_partial_eval(true_jaxpr: Jaxpr, false_jaxpr: Jaxpr, in_uks: list[bool]
+                       ) -> tuple[Jaxpr, Jaxpr, Jaxpr, Jaxpr, list[bool], int]:
   _, _, t_out_uks, _ = partial_eval_jaxpr(true_jaxpr , in_uks)
   _, _, f_out_uks, _ = partial_eval_jaxpr(false_jaxpr, in_uks)
   out_uks = map(op.or_, t_out_uks, f_out_uks)
@@ -2907,7 +2952,7 @@ def _cond_partial_eval(true_jaxpr: Jaxpr, false_jaxpr: Jaxpr, in_uks: List[bool]
   return t_jaxpr1, f_jaxpr1, t_jaxpr2, f_jaxpr2, out_uks, num_res
 
 def _join_jaxpr_res(jaxpr1: Jaxpr, jaxpr2: Jaxpr, n1: int, n2: int
-                    ) -> Tuple[Jaxpr, Jaxpr]:
+                    ) -> tuple[Jaxpr, Jaxpr]:
   jaxpr1_type, jaxpr2_type = typecheck_jaxpr(jaxpr1), typecheck_jaxpr(jaxpr2)
   out_types1, _ = split_list(jaxpr1_type.out_types, len(jaxpr1.outs) - n1)
   out_types2, _ = split_list(jaxpr2_type.out_types, len(jaxpr2.outs) - n2)
@@ -2928,8 +2973,8 @@ out = f_lin(3.14)
 print(out)
 
 
-def cond_peval_eqn(unks_in: List[bool], eqn: JaxprEqn,
-                   ) -> Tuple[JaxprEqn, JaxprEqn, List[bool], List[Atom]]:
+def cond_peval_eqn(unks_in: list[bool], eqn: JaxprEqn,
+                   ) -> tuple[JaxprEqn, JaxprEqn, list[bool], list[Atom]]:
   pred_unk, *unks_in = unks_in
   assert not pred_unk
   true_jaxpr, false_jaxpr = eqn.params['true_jaxpr'], eqn.params['false_jaxpr']
@@ -2956,7 +3001,7 @@ print(out)
 # Transposition is a fairly straightforward application of `transpose_jaxpr`:
 
 def cond_transpose_rule(cts, pred, *invals, true_jaxpr, false_jaxpr):
-  undef_primals = tuple([type(x) is UndefPrimal for x in invals])
+  undef_primals = tuple(type(x) is UndefPrimal for x in invals)
   true_jaxpr, true_consts = transpose_jaxpr(true_jaxpr, undef_primals)
   false_jaxpr, false_consts = transpose_jaxpr(false_jaxpr, undef_primals)
   true_jaxpr, false_jaxpr = _join_jaxpr_consts(
@@ -2973,7 +3018,7 @@ print(out)
 
 
 # + tags=["hide-input"]
-def pprint_cond(names: DefaultDict[Var, str], eqn: JaxprEqn) -> PPrint:
+def pprint_cond(names: defaultdict[Var, str], eqn: JaxprEqn) -> PPrint:
   true_jaxpr, false_jaxpr = eqn.params['true_jaxpr'], eqn.params['false_jaxpr']
   new_params = {k:v for k, v in eqn.params.items() if not k.endswith('jaxpr')}
   lhs = pp(' '.join(var_str(names, v) for v in eqn.out_binders))

@@ -1,4 +1,4 @@
-# Copyright 2018 Google LLC
+# Copyright 2018 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,24 +16,22 @@
 """
 
 from absl import app
-from absl import flags
 from functools import partial
+
+import jax
 from jax import grad
 from jax import jit
 from jax import vmap
-from jax.config import config
 import jax.numpy as jnp
 import jax.random as random
 import jax.scipy as scipy
 import matplotlib.pyplot as plt
 
-FLAGS = flags.FLAGS
-
 
 def main(unused_argv):
 
   numpts = 7
-  key = random.PRNGKey(0)
+  key = random.key(0)
   eye = jnp.eye(numpts)
 
   def cov_map(cov_func, xs, xs2=None):
@@ -76,7 +74,7 @@ def main(unused_argv):
           -0.5 * jnp.dot(y.T, kinvy) -
           jnp.sum(jnp.log(jnp.diag(chol))) -
           (numpts / 2.) * log2pi)
-      ml -= jnp.sum(-0.5 * jnp.log(2 * 3.1415) - jnp.log(amp)**2) # lognormal prior
+      ml -= jnp.sum(-0.5 * jnp.log(2 * 3.1415) - jnp.log(amp) - 0.5 * jnp.log(amp)**2) # lognormal prior
       return -ml
 
     if xtest is not None:
@@ -95,8 +93,8 @@ def main(unused_argv):
   params = {"amplitude": jnp.zeros((1, 1)),
             "noise": jnp.zeros((1, 1)) - 5.,
             "lengthscale": jnp.zeros((1, 1))}
-  momentums = dict([(k, p * 0.) for k, p in params.items()])
-  scales = dict([(k, p * 0. + 1.) for k, p in params.items()])
+  momentums = {k: p * 0. for k, p in params.items()}
+  scales = {k: p * 0. + 1. for k, p in params.items()}
 
   lr = 0.01  # Learning rate
   def train_step(params, momentums, scales, x, y):
@@ -128,5 +126,5 @@ def main(unused_argv):
                     mu.flatten() - std * 2, mu.flatten() + std * 2)
 
 if __name__ == "__main__":
-  config.config_with_absl()
+  jax.config.config_with_absl()
   app.run(main)

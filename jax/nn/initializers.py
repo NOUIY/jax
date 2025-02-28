@@ -1,4 +1,4 @@
-# Copyright 2019 Google LLC
+# Copyright 2019 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,8 +17,12 @@ Common neural network layer initializers, consistent with definitions
 used in Keras and Sonnet.
 """
 
-# flake8: noqa: F401
+# Note: import <name> as <name> is required for names to be exported.
+# See PEP 484 & https://github.com/jax-ml/jax/issues/7570
+
 from jax._src.nn.initializers import (
+  constant as constant,
+  Initializer as Initializer,
   delta_orthogonal as delta_orthogonal,
   glorot_normal as glorot_normal,
   glorot_uniform as glorot_uniform,
@@ -31,6 +35,7 @@ from jax._src.nn.initializers import (
   normal as normal,
   ones as ones,
   orthogonal as orthogonal,
+  truncated_normal as truncated_normal,
   uniform as uniform,
   variance_scaling as variance_scaling,
   xavier_normal as xavier_normal,

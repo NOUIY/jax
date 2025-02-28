@@ -1,4 +1,4 @@
-# Copyright 2021 Google LLC
+# Copyright 2021 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,13 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# flake8: noqa: F401
+# Note: import <name> as <name> is required for names to be exported.
+# See PEP 484 & https://github.com/jax-ml/jax/issues/7570
+
 from jax._src.errors import (
   JAXTypeError as JAXTypeError,
   JAXIndexError as JAXIndexError,
   ConcretizationTypeError as ConcretizationTypeError,
   NonConcreteBooleanIndexError as NonConcreteBooleanIndexError,
   TracerArrayConversionError as TracerArrayConversionError,
+  TracerBoolConversionError as TracerBoolConversionError,
   TracerIntegerConversionError as TracerIntegerConversionError,
   UnexpectedTracerError as UnexpectedTracerError,
+  KeyReuseError as KeyReuseError,
 )
+
+from jax._src.lib import xla_client as _xc
+JaxRuntimeError = _xc.XlaRuntimeError
+del _xc
+
+from jax._src.traceback_util import SimplifiedTraceback as SimplifiedTraceback

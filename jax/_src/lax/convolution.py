@@ -1,4 +1,4 @@
-# Copyright 2018 Google LLC
+# Copyright 2018 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,31 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import builtins
+from __future__ import annotations
+
+from collections.abc import Sequence
 from functools import partial
-from typing import Any, List, NamedTuple, Optional, Sequence, Tuple, Union
+import operator
+from typing import NamedTuple, Union
 
 import numpy as np
 
-from jax import core
+from jax._src import core
 from jax._src import dtypes
+from jax._src import util
+from jax._src.interpreters import ad
+from jax._src.interpreters import batching
+from jax._src.interpreters import mlir
 from jax._src.lax import lax
-from jax.interpreters import ad
-from jax.interpreters import batching
-from jax.interpreters import masking
-from jax.interpreters import mlir
-from jax.interpreters import xla
-from jax._src.util import safe_zip
-from jax._src.lib.mlir.dialects import mhlo
-from jax._src.lib import xla_client
+from jax._src.lib.mlir.dialects import hlo
+from jax._src.typing import Array, DTypeLike
 
-xops = xla_client.ops
-
-_max = builtins.max
-
-Array = Any
-DType = Any
-Shape = core.Shape
 
 class ConvDimensionNumbers(NamedTuple):
   """Describes batch, spatial, and feature dimensions of a convolution.
@@ -54,17 +48,20 @@ class ConvDimensionNumbers(NamedTuple):
   out_spec: Sequence[int]
 
 ConvGeneralDilatedDimensionNumbers = Union[
-  None, ConvDimensionNumbers, Tuple[str, str, str]]
+    tuple[str, str, str],
+    ConvDimensionNumbers,
+    None,
+]
 
 def conv_general_dilated(
   lhs: Array, rhs: Array, window_strides: Sequence[int],
-  padding: Union[str, Sequence[Tuple[int, int]]],
-  lhs_dilation: Optional[Sequence[int]] = None,
-  rhs_dilation: Optional[Sequence[int]] = None,
+  padding: str | Sequence[tuple[int, int]],
+  lhs_dilation: Sequence[int] | None = None,
+  rhs_dilation: Sequence[int] | None = None,
   dimension_numbers: ConvGeneralDilatedDimensionNumbers  = None,
   feature_group_count: int = 1, batch_group_count: int = 1,
   precision: lax.PrecisionLike = None,
-  preferred_element_type: Optional[DType] = None) -> Array:
+  preferred_element_type: DTypeLike | None = None) -> Array:
   """General n-dimensional convolution operator, with optional dilation.
 
   Wraps XLA's `Conv
@@ -76,25 +73,30 @@ def conv_general_dilated(
     rhs: a rank `n+2` dimensional array of kernel weights.
     window_strides: a sequence of `n` integers, representing the inter-window
       strides.
-    padding: either the string `'SAME'`, the string `'VALID'`, or a sequence of
-      `n` `(low, high)` integer pairs that give the padding to apply before and
-      after each spatial dimension.
-    lhs_dilation: `None`, or a sequence of `n` integers, giving the
-      dilation factor to apply in each spatial dimension of `lhs`. LHS dilation
-      is also known as transposed convolution.
-    rhs_dilation: `None`, or a sequence of `n` integers, giving the
-      dilation factor to apply in each spatial dimension of `rhs`. RHS dilation
-      is also known as atrous convolution.
-    dimension_numbers: either `None`, a ``ConvDimensionNumbers`` object, or
-      a 3-tuple ``(lhs_spec, rhs_spec, out_spec)``, where each element is a
-      string of length `n+2`.
+    padding: either the strings `'SAME'`, `'SAME_LOWER'`, or `'VALID'`, or a
+      sequence of `n` `(low, high)` integer pairs that give the padding to apply
+      before and after each spatial dimension. `'SAME'` and `'SAME_LOWER'` add
+      padding to produce same output size as the input. The padding is split
+      between the two sides equally or almost equally. In case the padding is an
+      odd number, the extra padding is added at the end for `'SAME'` and at the
+      beginning for `'SAME_LOWER'`.
+    lhs_dilation: `None`, or a sequence of `n` integers, giving the dilation
+      factor to apply in each spatial dimension of `lhs`. LHS dilation is also
+      known as transposed convolution.
+    rhs_dilation: `None`, or a sequence of `n` integers, giving the dilation
+      factor to apply in each spatial dimension of `rhs`. RHS dilation is also
+      known as atrous convolution.
+    dimension_numbers: either `None`, a ``ConvDimensionNumbers`` object, or a
+      3-tuple ``(lhs_spec, rhs_spec, out_spec)``, where each element is a string
+      of length `n+2`.
     feature_group_count: integer, default 1. See XLA HLO docs.
     batch_group_count: integer, default 1. See XLA HLO docs.
     precision: Optional. Either ``None``, which means the default precision for
-      the backend, a :class:`~jax.lax.Precision` enum value (``Precision.DEFAULT``,
-      ``Precision.HIGH`` or ``Precision.HIGHEST``), a string (e.g. 'highest' or
-      'fastest', see the ``jax.default_matmul_precision`` context manager), or a
-      tuple of two :class:`~jax.lax.Precision` enums or strings indicating precision of
+      the backend, a :class:`~jax.lax.Precision` enum value
+      (``Precision.DEFAULT``, ``Precision.HIGH`` or ``Precision.HIGHEST``), a
+      string (e.g. 'highest' or 'fastest', see the
+      ``jax.default_matmul_precision`` context manager), or a tuple of two
+      :class:`~jax.lax.Precision` enums or strings indicating precision of
       ``lhs`` and ``rhs``.
     preferred_element_type: Optional. Either ``None``, which means the default
       accumulation type for the input types, or a datatype, indicating to
@@ -112,7 +114,7 @@ def conv_general_dilated(
   - the input and output feature dimensions in rhs with the characters 'I'
     and 'O' respectively, and
   - spatial dimension correspondences between lhs, rhs, and the output using
-    any distinct characters.
+    any distinct characters. The examples below use 'W' and 'H'.
 
   For example, to indicate dimension numbers consistent with the ``conv``
   function with two spatial dimensions, one could use ``('NCHW', 'OIHW',
@@ -139,11 +141,20 @@ def conv_general_dilated(
     rhs_dilation = (1,) * (rhs.ndim - 2)
   if isinstance(padding, str):
     lhs_perm, rhs_perm, _ = dnums
-    rhs_shape = np.take(rhs.shape, rhs_perm)[2:]  # type: ignore[index]
-    effective_rhs_shape = [(k-1) * r + 1 for k, r in zip(rhs_shape, rhs_dilation)]
+    rhs_shape = np.take(rhs.shape, rhs_perm)[2:]
+    effective_rhs_shape = [core.dilate_dim(k, r) for k, r in zip(rhs_shape, rhs_dilation)]
     padding = lax.padtype_to_pads(
-        np.take(lhs.shape, lhs_perm)[2:], effective_rhs_shape,  # type: ignore[index]
+        np.take(lhs.shape, lhs_perm)[2:], effective_rhs_shape,
         window_strides, padding)
+  else:
+    try:
+      padding = tuple((operator.index(lo), operator.index(hi))
+                      for lo, hi in padding)
+    except (ValueError, TypeError) as e:
+      raise ValueError(
+        "padding argument to conv_general_dilated should be a string or a "
+        f"sequence of (low, high) pairs, got {padding}") from e
+
   preferred_element_type = (
       None if preferred_element_type is None else
       dtypes.canonicalize_dtype(np.dtype(preferred_element_type)))
@@ -153,7 +164,6 @@ def conv_general_dilated(
       dimension_numbers=dnums,
       feature_group_count=feature_group_count,
       batch_group_count=batch_group_count,
-      lhs_shape=lhs.shape, rhs_shape=rhs.shape,
       precision=lax.canonicalize_precision(precision),
       preferred_element_type=preferred_element_type)
 
@@ -163,7 +173,7 @@ def conv_general_dilated(
 
 def conv(lhs: Array, rhs: Array, window_strides: Sequence[int],
          padding: str, precision: lax.PrecisionLike = None,
-         preferred_element_type: Optional[DType] = None) -> Array:
+         preferred_element_type: DTypeLike | None = None) -> Array:
   """Convenience wrapper around `conv_general_dilated`.
 
   Args:
@@ -189,11 +199,11 @@ def conv(lhs: Array, rhs: Array, window_strides: Sequence[int],
 
 def conv_with_general_padding(lhs: Array, rhs: Array,
                               window_strides: Sequence[int],
-                              padding: Union[str, Sequence[Tuple[int, int]]],
-                              lhs_dilation: Optional[Sequence[int]],
-                              rhs_dilation: Optional[Sequence[int]],
+                              padding: str | Sequence[tuple[int, int]],
+                              lhs_dilation: Sequence[int] | None,
+                              rhs_dilation: Sequence[int] | None,
                               precision: lax.PrecisionLike = None,
-                              preferred_element_type: Optional[DType] = None) -> Array:
+                              preferred_element_type: DTypeLike | None = None) -> Array:
   """Convenience wrapper around `conv_general_dilated`.
 
   Args:
@@ -245,7 +255,7 @@ def _conv_transpose_padding(k, s, padding):
     else:
       pad_a = int(np.ceil(pad_len / 2))
   elif padding == 'VALID':
-    pad_len = k + s - 2 + _max(k - s, 0)
+    pad_len = k + s - 2 + max(k - s, 0)
     pad_a = k - 1
   else:
     raise ValueError('Padding mode must be `SAME` or `VALID`.')
@@ -261,12 +271,12 @@ def _flip_axes(x, axes):
 
 
 def conv_transpose(lhs: Array, rhs: Array, strides: Sequence[int],
-                   padding: Union[str, Sequence[Tuple[int, int]]],
-                   rhs_dilation: Optional[Sequence[int]] = None,
+                   padding: str | Sequence[tuple[int, int]],
+                   rhs_dilation: Sequence[int] | None = None,
                    dimension_numbers: ConvGeneralDilatedDimensionNumbers = None,
                    transpose_kernel: bool = False,
                    precision: lax.PrecisionLike = None,
-                   preferred_element_type: Optional[DType] = None) -> Array:
+                   preferred_element_type: DTypeLike | None = None) -> Array:
   """Convenience wrapper for calculating the N-d convolution "transpose".
 
   This function directly calculates a fractionally strided conv rather than
@@ -318,13 +328,13 @@ def conv_transpose(lhs: Array, rhs: Array, strides: Sequence[int],
       raise ValueError('No 4+ dimensional dimension_number defaults.')
   dn = conv_dimension_numbers(lhs.shape, rhs.shape, dimension_numbers)
   k_shape = np.take(rhs.shape, dn.rhs_spec)
-  k_sdims = k_shape[2:]  # type: ignore[index]
+  k_sdims = k_shape[2:]
   # Calculate correct output shape given padding and strides.
-  pads: Union[str, Sequence[Tuple[int, int]]]
+  pads: str | Sequence[tuple[int, int]]
   if isinstance(padding, str) and padding in {'SAME', 'VALID'}:
     if rhs_dilation is None:
       rhs_dilation = (1,) * (rhs.ndim - 2)
-    effective_k_size = map(lambda k, r: (k-1) * r + 1, k_sdims, rhs_dilation)
+    effective_k_size = map(lambda k, r: core.dilate_dim(k, r), k_sdims, rhs_dilation)
     pads = [_conv_transpose_padding(k, s, padding)
             for k,s in zip(effective_k_size, strides)]
   else:
@@ -332,7 +342,7 @@ def conv_transpose(lhs: Array, rhs: Array, strides: Sequence[int],
   if transpose_kernel:
     # flip spatial dims and swap input / output channel axes
     rhs = _flip_axes(rhs, np.array(dn.rhs_spec)[2:])
-    rhs = np.swapaxes(rhs, dn.rhs_spec[0], dn.rhs_spec[1])
+    rhs = rhs.swapaxes(dn.rhs_spec[0], dn.rhs_spec[1])
   return conv_general_dilated(lhs, rhs, one, pads, strides, rhs_dilation, dn,
                               precision=precision,
                               preferred_element_type=preferred_element_type)
@@ -341,7 +351,7 @@ def conv_transpose(lhs: Array, rhs: Array, strides: Sequence[int],
 def _conv_general_dilated_shape_rule(
     lhs: core.ShapedArray, rhs: core.ShapedArray, *, window_strides, padding,
     lhs_dilation, rhs_dilation, dimension_numbers, feature_group_count,
-    batch_group_count, **unused_kwargs) -> Tuple[int, ...]:
+    batch_group_count, **unused_kwargs) -> tuple[int, ...]:
   assert type(dimension_numbers) is ConvDimensionNumbers
   if len(lhs.shape) != len(rhs.shape):
     msg = ("conv_general_dilated lhs and rhs must have the same number of "
@@ -357,7 +367,7 @@ def _conv_general_dilated_shape_rule(
     msg = ("conv_general_dilated feature_group_count must divide lhs feature "
            "dimension size, but {} does not divide {}.")
     raise ValueError(msg.format(feature_group_count, lhs_feature_count))
-  if not core.symbolic_equal_dim(quot, rhs.shape[dimension_numbers.rhs_spec[1]]):
+  if not core.definitely_equal(quot, rhs.shape[dimension_numbers.rhs_spec[1]]):
     msg = ("conv_general_dilated lhs feature dimension size divided by "
            "feature_group_count must equal the rhs input feature dimension "
            "size, but {} // {} != {}.")
@@ -401,17 +411,17 @@ def _conv_general_dilated_shape_rule(
   rhs_trans = lax._dilate_shape(np.take(rhs.shape, rhs_perm), rhs_dilation)
   out_trans = conv_shape_tuple(lhs_trans, rhs_trans, window_strides, padding,
                                batch_group_count)
-  return tuple(np.take(out_trans, np.argsort(out_perm)))  # type: ignore[arg-type]
+  return tuple(np.take(out_trans, np.argsort(out_perm)))
 
 
 def _conv_general_dilated_dtype_rule(
     lhs, rhs, *, window_strides, padding, lhs_dilation, rhs_dilation,
     dimension_numbers, preferred_element_type, **unused_kwargs):
-  input_dtype = lax.naryop_dtype_rule(lax._input_dtype, [lax._any, lax._any],
-                                      'conv_general_dilated', lhs, rhs)
+  result_dtype = lax.naryop_dtype_rule(lax._input_dtype, [lax._any, lax._any],
+                                       'conv_general_dilated', lhs, rhs)
   if preferred_element_type is None:
-    return input_dtype
-  lax._validate_preferred_element_type(input_dtype, preferred_element_type)
+    return result_dtype
+  lax._validate_preferred_element_type(result_dtype, preferred_element_type)
   return preferred_element_type
 
 _conv_spec_transpose = lambda spec: (spec[1], spec[0]) + spec[2:]
@@ -445,11 +455,13 @@ _conv_sdims = lambda spec: spec[2:]
 # --> which is feature grouping.
 
 def _conv_general_dilated_transpose_lhs(
-    g, rhs, *, window_strides, padding, lhs_dilation, rhs_dilation,
+    g, lhs, rhs, *, window_strides, padding, lhs_dilation, rhs_dilation,
     dimension_numbers, feature_group_count, batch_group_count,
-    lhs_shape, rhs_shape, precision, preferred_element_type):
+    precision, preferred_element_type):
   assert type(dimension_numbers) is ConvDimensionNumbers
   assert batch_group_count == 1 or feature_group_count == 1
+  rhs_shape = rhs.shape
+  lhs_shape = lhs.aval.shape
   lhs_sdims, rhs_sdims, out_sdims = map(_conv_sdims, dimension_numbers)
   lhs_spec, rhs_spec, out_spec = dimension_numbers
   t_rhs_spec = _conv_spec_transpose(rhs_spec)
@@ -481,20 +493,15 @@ def _conv_general_dilated_transpose_lhs(
   return out
 
 def _conv_general_dilated_transpose_rhs(
-    g, lhs, *, window_strides, padding, lhs_dilation, rhs_dilation,
+    g, lhs, rhs, *, window_strides, padding, lhs_dilation, rhs_dilation,
     dimension_numbers: ConvDimensionNumbers, feature_group_count: int,
-    batch_group_count: int, lhs_shape, rhs_shape, precision,
-    preferred_element_type):
+    batch_group_count: int, precision, preferred_element_type):
   assert type(dimension_numbers) is ConvDimensionNumbers
   if np.size(g) == 0:
     # Avoids forming degenerate convolutions where the RHS has spatial size 0.
-    # Awkwardly, we don't have an aval for the rhs readily available, so instead
-    # of returning an ad_util.Zero instance here, representing a symbolic zero
-    # value, we instead return a None, which is meant to represent having no
-    # cotangent at all (and is thus incorrect for this situation), since the two
-    # are treated the same operationally.
-    # TODO(mattjj): adjust defbilinear so that the rhs aval is available here
-    return None
+    return ad.Zero(rhs.aval)
+  lhs_shape = lhs.shape
+  rhs_shape = rhs.aval.shape
   lhs_sdims, rhs_sdims, out_sdims = map(_conv_sdims, dimension_numbers)
   lhs_trans, rhs_trans, out_trans = map(_conv_spec_transpose, dimension_numbers)
   assert batch_group_count == 1 or feature_group_count == 1
@@ -517,55 +524,6 @@ def _conv_general_dilated_transpose_rhs(
       batch_group_count=batch_group_count, precision=precision,
       preferred_element_type=preferred_element_type)
 
-
-def _conv_general_dilated_translation_rule(
-    ctx, avals_in, avals_out, lhs, rhs, *, window_strides, padding,
-    lhs_dilation, rhs_dilation, dimension_numbers, feature_group_count,
-    batch_group_count, precision, expand_complex_convolutions,
-    preferred_element_type, **unused_kwargs):
-  assert type(dimension_numbers) is ConvDimensionNumbers
-  dimension_numbers = _conv_general_proto(dimension_numbers)
-  precision_config = lax._precision_config(precision)
-  dtype = avals_in[0].dtype
-  if expand_complex_convolutions and np.issubdtype(dtype, np.complexfloating):
-    # We use a trick for complex multiplication due to Gauss which uses three
-    # multiplications and five additions; instead of the naive method of four
-    # multiplications and two additions.
-    # https://en.wikipedia.org/wiki/Multiplication_algorithm#Complex_multiplication_algorithm
-    #
-    # This performance win comes with a trade-off in accuracy; especially in
-    # cases when the real and imaginary differ hugely in magnitude. The relative
-    # error bound (e.g. 1p-24 in case of float32) would be relative to the
-    # maximum of real and imaginary parts of the result instead of being
-    # satisfied by the real and imaginary parts independently of each other.
-    if preferred_element_type is not None:
-      # Convert complex dtype to types used for real and imaginary parts
-      assert np.issubdtype(preferred_element_type, np.complexfloating)
-      preferred_element_type = xla.dtype_to_primitive_type(np.dtype(
-          np.float64 if preferred_element_type == np.complex128
-          else np.float32))
-
-    conv = lambda x, y: xops.ConvGeneralDilated(
-        x, y, window_strides, padding, lhs_dilation, rhs_dilation,
-        dimension_numbers, feature_group_count, batch_group_count,
-        precision_config=precision_config,
-        preferred_element_type=preferred_element_type)
-    lhs_real, lhs_imag = xops.Real(lhs), xops.Imag(lhs)
-    rhs_real, rhs_imag = xops.Real(rhs), xops.Imag(rhs)
-    k1 = conv(xops.Add(lhs_real, lhs_imag), rhs_real)
-    k2 = conv(lhs_real, xops.Sub(rhs_imag, rhs_real))
-    k3 = conv(lhs_imag, xops.Add(rhs_real, rhs_imag))
-    return [xops.Complex(xops.Sub(k1, k3), xops.Add(k1, k2))]
-
-  if preferred_element_type is not None:
-    preferred_element_type = xla.dtype_to_primitive_type(preferred_element_type)
-
-  return [xops.ConvGeneralDilated(
-      lhs, rhs, window_strides, padding, lhs_dilation, rhs_dilation,
-      dimension_numbers, feature_group_count, batch_group_count,
-      precision_config=precision_config,
-      preferred_element_type=preferred_element_type)]
-
 def _conv_general_dilated_batch_rule(
     batched_args, batch_dims, *, window_strides, padding,
     lhs_dilation, rhs_dilation, dimension_numbers,
@@ -575,6 +533,29 @@ def _conv_general_dilated_batch_rule(
   lhs, rhs = batched_args
   lhs_bdim, rhs_bdim = batch_dims
   lhs_spec, rhs_spec, out_spec = dimension_numbers
+
+  # Some of the cases that reshape into batch or feature dimensions do not work
+  # with size 0 batch dimensions. The best fix would be to extend HLO to support
+  # multiple batch dimensions.
+  if ((lhs_bdim is not None and lhs.shape[lhs_bdim] == 0) or
+      (rhs_bdim is not None and rhs.shape[rhs_bdim] == 0)):
+    lhs_shape_unbatched, rhs_shape_unbatched = list(lhs.shape), list(rhs.shape)
+    if lhs_bdim is not None:
+      lhs_shape_unbatched.pop(lhs_bdim)
+    if rhs_bdim is not None:
+      rhs_shape_unbatched.pop(rhs_bdim)
+    shape = _conv_general_dilated_shape_rule(
+      core.ShapedArray(lhs_shape_unbatched, lhs.dtype),
+      core.ShapedArray(rhs_shape_unbatched, rhs.dtype),
+      window_strides=window_strides, padding=padding, lhs_dilation=lhs_dilation,
+      rhs_dilation=rhs_dilation, dimension_numbers=dimension_numbers,
+      feature_group_count=feature_group_count,
+      batch_group_count=batch_group_count)
+    return lax.full(
+      (0,) + shape, 0,
+      dtype=lhs.dtype if preferred_element_type is None
+            else preferred_element_type), 0
+
 
   if lhs_bdim is not None and rhs_bdim is not None:
     assert lhs.shape[lhs_bdim] == rhs.shape[rhs_bdim]
@@ -638,8 +619,7 @@ def _conv_general_dilated_batch_rule(
       new_rhs = _reshape_axis_out_of(rhs_spec[0] + int(rhs_bdim <= rhs_spec[0]),
                                      group_count, rhs)
       new_rhs = _reshape_axis_into(rhs_bdim + int(rhs_spec[0] < rhs_bdim),
-                                   rhs_spec[0] + 1,
-                                   new_rhs)
+                                   rhs_spec[0] + 1, new_rhs)
       new_rhs = _reshape_axis_into(rhs_spec[0], rhs_spec[0], new_rhs)
       out = conv_general_dilated(lhs, new_rhs, window_strides, padding,
                                  lhs_dilation, rhs_dilation, dimension_numbers,
@@ -651,55 +631,15 @@ def _conv_general_dilated_batch_rule(
       out = _reshape_axis_into(out_spec[1], out_spec[1] + 1, out)
       return out, out_spec[1]
 
-def _conv_general_dilated_masking_rule(
-        padded_vals, logical_shapes, window_strides, padding, lhs_dilation,
-        rhs_dilation, dimension_numbers, feature_group_count, batch_group_count,
-        lhs_shape, rhs_shape, precision, preferred_element_type):
-  lhs, rhs = padded_vals
-  logical_lhs_shape, logical_rhs_shape = logical_shapes
-
-  o, i, *window_dimensions = dimension_numbers.rhs_spec
-  assert (np.all(np.take(rhs.shape, window_dimensions)
-                  == np.take(logical_rhs_shape, window_dimensions))), \
-              "Conv filter masking not yet implemented."
-
-  n, c, *padded_dimensions = dimension_numbers.lhs_spec
-
-  return conv_general_dilated(
-    lax._masked(lhs, logical_lhs_shape, padded_dimensions),
-    lax._masked(rhs, logical_rhs_shape, (i,)),
-    window_strides=window_strides, padding=padding,
-    lhs_dilation=lhs_dilation, rhs_dilation=rhs_dilation,
-    dimension_numbers=dimension_numbers,
-    feature_group_count=feature_group_count,
-    batch_group_count=batch_group_count,
-    precision=precision,
-    preferred_element_type=preferred_element_type)
-
 conv_general_dilated_p = lax.standard_primitive(
     _conv_general_dilated_shape_rule, _conv_general_dilated_dtype_rule,
-    'conv_general_dilated', partial(_conv_general_dilated_translation_rule,
-                                    expand_complex_convolutions=False))
-
-# TODO(b/161124619, b/161126248): XLA does not support complex convolution on
-# GPU, and on CPU it uses a slow loop-based implementation;
-# on these backends, lower complex convolutions away.
-xla.register_translation(conv_general_dilated_p,
-                         partial(_conv_general_dilated_translation_rule,
-                                 expand_complex_convolutions=True),
-                         platform='cpu')
-xla.register_translation(conv_general_dilated_p,
-                         partial(_conv_general_dilated_translation_rule,
-                                 expand_complex_convolutions=True),
-                         platform='gpu')
+    'conv_general_dilated')
 
 ad.defbilinear(conv_general_dilated_p,
                _conv_general_dilated_transpose_lhs,
                _conv_general_dilated_transpose_rhs)
 batching.primitive_batchers[conv_general_dilated_p] = \
     _conv_general_dilated_batch_rule
-masking.masking_rules[conv_general_dilated_p] = \
-  _conv_general_dilated_masking_rule
 
 def _complex_mul(mul, x, y):
   # We use a trick for complex multiplication sometimes attributed to Gauss
@@ -749,7 +689,7 @@ def _conv_general_dilated_lower(
     return complex_conv(ctx, lhs, rhs)
 
   lhs_spec, rhs_spec, out_spec = dimension_numbers
-  dnums = mhlo.ConvDimensionNumbers.get(
+  dnums = hlo.ConvDimensionNumbers.get(
     input_batch_dimension=lhs_spec[0],
     input_feature_dimension=lhs_spec[1],
     input_spatial_dimensions=list(lhs_spec[2:]),
@@ -760,18 +700,61 @@ def _conv_general_dilated_lower(
     output_feature_dimension=out_spec[1],
     output_spatial_dimensions=list(out_spec[2:]))
   num_spatial_dims = len(rhs_spec) - 2
-  window_reversal = mlir.dense_bool_elements([False] * num_spatial_dims)
-  return [mhlo.ConvOp(mlir.aval_to_ir_type(aval_out), lhs, rhs,
-                      mlir.dense_int_elements(window_strides),
-                      mlir.dense_int_elements(padding),
-                      mlir.dense_int_elements(lhs_dilation),
-                      mlir.dense_int_elements(rhs_dilation),
-                      window_reversal, dnums,
-                      mlir.i64_attr(feature_group_count),
-                      mlir.i64_attr(batch_group_count),
-                      lax.precision_attr(precision)).result]
+  if len(padding) == 0:
+    padding = np.zeros((0, 2), dtype=np.int64)
+  window_reversal = mlir.dense_bool_array([False] * num_spatial_dims)
+  if (not core.is_constant_shape(window_strides) or
+      not core.is_constant_shape(lhs_dilation) or
+      not core.is_constant_shape(rhs_dilation) or
+      not core.is_constant_dim(feature_group_count) or
+      not core.is_constant_dim(batch_group_count)):
+    # TODO(https://github.com/openxla/stablehlo/issues/1268)
+    raise NotImplementedError("Convolutions with non-static strides, dilation, feature_group_count, or batch_group_count")
+  if all(core.is_constant_shape(p) for p in padding):
+    return [
+        hlo.convolution(
+          mlir.aval_to_ir_type(aval_out),
+          lhs,
+          rhs,
+          dimension_numbers=dnums,
+          feature_group_count=mlir.i64_attr(feature_group_count),
+          batch_group_count=mlir.i64_attr(batch_group_count),
+          window_strides=mlir.dense_int_array(window_strides),
+          padding=mlir.dense_int_elements(padding),
+          lhs_dilation=mlir.dense_int_array(lhs_dilation),
+          rhs_dilation=mlir.dense_int_array(rhs_dilation),
+          window_reversal=window_reversal,
+          precision_config=lax.precision_attr(precision))
+    ]
+  else:
+    # d_padding will be an array i32[N, 2] with pad_lo and pad_hi for each
+    # spatial dimension.
+    int2d = mlir.aval_to_ir_type(core.ShapedArray((1, 2), np.int32))
+    def prep_one_pad(pad_lo_hi: tuple[core.DimSize, core.DimSize]):
+      pad1 = mlir.eval_dynamic_shape_as_tensor(ctx, pad_lo_hi)  # i32[2]
+      return hlo.ReshapeOp(int2d, pad1)
+    d_padding = hlo.ConcatenateOp(list(map(prep_one_pad, padding)),
+                                  mlir.i64_attr(0))
+    return [
+        hlo.dynamic_conv(
+          mlir.aval_to_ir_type(aval_out),
+          lhs,
+          rhs,
+          d_padding,
+          dimension_numbers=dnums,
+          feature_group_count=mlir.i64_attr(feature_group_count),
+          batch_group_count=mlir.i64_attr(batch_group_count),
+          window_strides=mlir.dense_int_array(window_strides),
+          lhs_dilation=mlir.dense_int_array(lhs_dilation),
+          rhs_dilation=mlir.dense_int_array(rhs_dilation),
+          window_reversal=window_reversal,
+          precision_config=lax.precision_attr(precision))
+    ]
 
 mlir.register_lowering(conv_general_dilated_p, _conv_general_dilated_lower)
+# TODO(b/161124619, b/161126248): XLA does not support complex convolution on
+# GPU, and on CPU it uses a slow loop-based implementation;
+# on these backends, lower complex convolutions away.
 mlir.register_lowering(
     conv_general_dilated_p,
     partial(_conv_general_dilated_lower, expand_complex_convolutions=True),
@@ -783,6 +766,10 @@ mlir.register_lowering(
 
 
 def _reshape_axis_into(src, dst, x):
+  # NB: `dst` is the number of the dimension that we should reshape into
+  # *after* `src` is removed from `x`'s list of dimensions. For example, if
+  # `src` is an added batch dimension, `dst` might name a target dimension in
+  # the unbatched list of dimensions.
   perm = [i for i in range(x.ndim) if i != src]
   perm.insert(dst, src)
   new_shape = list(np.delete(x.shape, src))
@@ -797,27 +784,6 @@ def _reshape_axis_out_of(src, size1, x):
   return lax.reshape(x, shape)
 
 
-def _check_conv_shapes(name, lhs_shape, rhs_shape, window_strides):
-  """Check that conv shapes are valid and are consistent with window_strides."""
-  if len(lhs_shape) != len(rhs_shape):
-    msg = "Arguments to {} must have same rank, got {} and {}."
-    raise TypeError(msg.format(name, len(lhs_shape), len(rhs_shape)))
-  if len(lhs_shape) < 2:
-    msg = "Arguments to {} must have rank at least 2, got {} and {}."
-    raise TypeError(msg.format(name, len(lhs_shape), len(rhs_shape)))
-  if lhs_shape[1] != rhs_shape[1]:
-    msg = "Arguments to {} must agree on input feature size, got {} and {}."
-    raise TypeError(msg.format(name, lhs_shape[1], rhs_shape[1]))
-  lax._check_shapelike(name, "window_strides", window_strides)
-  if not np.all(np.greater(window_strides, 0)):
-    msg = "All elements of window_strides must be positive, got {}."
-    raise TypeError(msg.format(window_strides))
-  if len(window_strides) != len(lhs_shape) - 2:
-    msg = "{} window_strides has wrong length: expected {}, got {}."
-    expected_length = len(lhs_shape) - 2
-    raise TypeError(msg.format(name, expected_length, len(window_strides)))
-
-
 def conv_shape_tuple(lhs_shape, rhs_shape, strides, pads, batch_group_count=1):
   """Compute the shape tuple of a conv given input shapes in canonical order."""
   if isinstance(pads, str):
@@ -828,8 +794,10 @@ def conv_shape_tuple(lhs_shape, rhs_shape, strides, pads, batch_group_count=1):
 
   lhs_padded = np.add(lhs_shape[2:], np.sum(np.array(pads).reshape(-1, 2),
                                               axis=1))
-  out_space = core.stride_shape(lhs_padded, rhs_shape[2:], strides)
-  out_space = np.maximum(0, out_space)
+  if np.any(lhs_padded < 0):
+    raise ValueError("Negative padding is larger than the size of the corresponding dimension: "
+                     f"got padding={pads} for lhs_shape[2:]={lhs_shape[2:]}")
+  out_space = tuple(map(core.stride_dim, lhs_padded, rhs_shape[2:], strides))
   if batch_group_count > 1:
     assert lhs_shape[0] % batch_group_count == 0
     out_shape_0 = lhs_shape[0] // batch_group_count
@@ -873,8 +841,7 @@ def conv_dimension_numbers(lhs_shape, rhs_shape, dimension_numbers
     lhs_shape: tuple of nonnegative integers, shape of the convolution input.
     rhs_shape: tuple of nonnegative integers, shape of the convolution kernel.
     dimension_numbers: None or a tuple/list of strings or a ConvDimensionNumbers
-      object following the convolution dimension number specification format in
-      xla_client.py.
+      object.
 
   Returns:
     A `ConvDimensionNumbers` object that represents `dimension_numbers` in the
@@ -938,32 +905,16 @@ def conv_general_permutations(dimension_numbers):
   return lhs_perm, rhs_perm, out_perm
 
 
-def _conv_general_proto(dimension_numbers):
-  assert type(dimension_numbers) is ConvDimensionNumbers
-  lhs_spec, rhs_spec, out_spec = dimension_numbers
-  proto = xla_client.ConvolutionDimensionNumbers()
-  proto.input_batch_dimension = lhs_spec[0]
-  proto.input_feature_dimension = lhs_spec[1]
-  proto.output_batch_dimension = out_spec[0]
-  proto.output_feature_dimension = out_spec[1]
-  proto.kernel_output_feature_dimension = rhs_spec[0]
-  proto.kernel_input_feature_dimension = rhs_spec[1]
-  proto.input_spatial_dimensions.extend(lhs_spec[2:])
-  proto.kernel_spatial_dimensions.extend(rhs_spec[2:])
-  proto.output_spatial_dimensions.extend(out_spec[2:])
-  return proto
-
-
 def _conv_general_vjp_lhs_padding(
     in_shape, window_dimensions, window_strides, out_shape, padding,
-    lhs_dilation, rhs_dilation) -> List[Tuple[int, int]]:
+    lhs_dilation, rhs_dilation) -> list[tuple[int, int]]:
   lhs_dilated_shape = lax._dilate_shape(in_shape, lhs_dilation)
   rhs_dilated_shape = lax._dilate_shape(window_dimensions, rhs_dilation)
   out_dilated_shape = lax._dilate_shape(out_shape, window_strides)
   pad_before = np.subtract(rhs_dilated_shape, [lo for lo, _ in padding]) - 1
   pad_after = (np.add(lhs_dilated_shape, rhs_dilated_shape) - 1
                - out_dilated_shape - pad_before)
-  return safe_zip(pad_before, pad_after)
+  return util.safe_zip(pad_before, pad_after)
 
 
 def _conv_general_vjp_rhs_padding(
@@ -975,9 +926,8 @@ def _conv_general_vjp_rhs_padding(
   lhs_dilated_shape = lax._dilate_shape(in_shape, lhs_dilation)
   rhs_dilated_shape = lax._dilate_shape(window_dimensions, rhs_dilation)
   out_dilated_shape = lax._dilate_shape(out_shape, window_strides)
-  pads_lo, _ = zip(*padding)
-  pads_from_lhs = core.diff_shape(out_dilated_shape, lhs_dilated_shape)
-  pads_from_rhs = core.diff_shape(core.diff_shape(rhs_dilated_shape, pads_lo),
-                                  (1,) * len(pads_lo))
-  pads_hi = core.sum_shapes(pads_from_lhs, pads_from_rhs)
+  pads_lo, _ = util.unzip2(padding)
+  pads_from_lhs = map(operator.sub, out_dilated_shape, lhs_dilated_shape)
+  pads_from_rhs = tuple(rd - pd - 1 for rd, pd in zip(rhs_dilated_shape, pads_lo))
+  pads_hi = tuple(map(operator.add, pads_from_lhs, pads_from_rhs))
   return list(zip(pads_lo, pads_hi))

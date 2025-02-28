@@ -1,4 +1,4 @@
-# Copyright 2018 Google LLC
+# Copyright 2018 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,14 +13,17 @@
 # limitations under the License.
 
 
-# flake8: noqa: F401
+from jax._src.core import (
+  shaped_abstractify as shaped_abstractify
+)
+
 from jax._src.api_util import (
-  argnums_partial,
-  donation_vector,
-  flatten_axes,
-  flatten_fun,
-  flatten_fun_nokwargs,
-  rebase_donate_argnums,
-  safe_map,
-  shaped_abstractify,
+  argnums_partial as argnums_partial,
+  debug_info as debug_info,
+  donation_vector as donation_vector,
+  flatten_axes as flatten_axes,
+  flatten_fun as flatten_fun,
+  flatten_fun_nokwargs as flatten_fun_nokwargs,
+  rebase_donate_argnums as rebase_donate_argnums,
+  safe_map as safe_map,
 )

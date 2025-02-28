@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2020 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,28 +12,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import io
 import unittest
 
 from absl.testing import absltest
 from jax._src import test_util as jtu
 
 import jax
+from jax._src import config as jax_config
+from jax._src.lib.mlir import ir
 from jax import numpy as jnp
 
-from jax.config import config
-config.parse_flags_with_absl()
+jax.config.parse_flags_with_absl()
+
+
+def module_to_string(module: ir.Module) -> str:
+  output = io.StringIO()
+  module.operation.print(file=output, enable_debug_info=True,
+                         print_generic_op_form=False)
+  return output.getvalue()
+
 
 class MetadataTest(jtu.JaxTestCase):
 
   def test_jit_metadata(self):
-    hlo = jax.xla_computation(jnp.sin)(1.).get_hlo_module().to_string()
-    self.assertRegex(hlo, 'op_type="sin"')
-    self.assertRegex(hlo, 'op_name="xla_computation\\(sin\\)/sin"')
+    hlo = module_to_string(jax.jit(jnp.sin).lower(1.).compiler_ir())
+    self.assertRegex(hlo, r'loc\("jit\(sin\)/jit\(main\)/sin"')
     def foo(x):
       return jnp.sin(x)
-    hlo = jax.xla_computation(foo)(1.).get_hlo_module().to_string()
-    self.assertRegex(hlo, 'op_type="sin"')
-    self.assertRegex(hlo, 'op_name="xla_computation\\(foo\\)/sin"')
+    hlo = module_to_string(jax.jit(foo).lower(1.).compiler_ir())
+    self.assertRegex(hlo, r'loc\("jit\(foo\)/jit\(main\)/sin"')
 
   @unittest.skip("TODO") # TODO(jekbradbury)
   def test_nested_jit_metadata(self):
@@ -61,55 +69,56 @@ class MetadataTest(jtu.JaxTestCase):
     @jax.jit
     def foo(x):
       return jnp.sin(x)
-    hlo = jax.xla_computation(jax.grad(foo))(1.).get_hlo_module().to_string()
-    self.assertRegex(hlo, 'op_type="sin"')
-    self.assertRegex(hlo, 'op_type="cos"')
-    self.assertRegex(hlo, 'op_type="mul"')
-    # TODO(mattjj,jekbradbury): update these tests post-omnistaging
-    # self.assertRegex(hlo, 'op_name=".*jit\\(jvp\\(foo\\)\\)/sin"')
-    # self.assertRegex(hlo, 'op_name=".*jit\\(jvp\\(foo\\)\\)/cos"')
-    # self.assertRegex(hlo, 'op_name=".*jit\\(transpose\\('
-    #                       'jvp\\(foo\\)\\)\\)/mul"')
+    hlo = module_to_string(jax.jit(jax.grad(foo)).lower(1.).compiler_ir())
+    self.assertRegex(hlo, r'loc\(".*jvp\(jit\(foo\)\)/cos"')
+    self.assertRegex(hlo, r'loc\(".*transpose\(jvp\(jit\(foo\)\)\)/mul"')
 
   def test_cond_metadata(self):
     def true_fun(x):
       return jnp.sin(x)
     def false_fun(x):
       return jnp.cos(x)
-    def f(x):
-      return jax.lax.cond(True, x, true_fun, x, false_fun)
-    hlo = jax.xla_computation(f)(1.).get_hlo_module().to_string()
-    self.assertRegex(hlo, 'op_type="cond"')
-    self.assertRegex(hlo, 'op_name=".*cond\\[linear=\\(False, False\\)\\]"')
-    self.assertRegex(hlo, 'op_type="cos"')
-    self.assertRegex(hlo, 'op_name=".*cond/branch_0_fun/cos"')
-    self.assertRegex(hlo, 'op_type="sin"')
-    self.assertRegex(hlo, 'op_name=".*cond/branch_1_fun/sin"')
+    def f(which, x):
+      return jax.lax.cond(which, x, true_fun, x, false_fun)
+    hlo = module_to_string(jax.jit(f).lower(True, 1.).compiler_ir())
+    self.assertRegex(hlo, r'loc\(".*cond/branch_0_fun/cos"')
+    self.assertRegex(hlo, r'loc\(".*cond/branch_1_fun/sin"')
 
+  def test_argmax(self):
+    def f(x):
+      return jnp.argmax(x)
+    hlo = module_to_string(jax.jit(f).lower(jnp.arange(8.0)).compiler_ir())
+    self.assertNotRegex(hlo, r'<.* at 0x[0-9a-fA-F]+>')
+
+  @unittest.skip('b/352539562')
   def test_source_file_prefix_removal(self):
+
     def make_hlo():
-      return jax.xla_computation(jnp.sin)(1.).get_hlo_module().to_string()
+      return module_to_string(
+          jax.jit(jnp.sin).lower(jnp.arange(8.0)).compiler_ir()
+      )
 
     # Sanity check
-    self.assertIn("/tests/metadata_test.py", make_hlo())
+    self.assertRegex(make_hlo(), r"[/\\]+tests[/\\]+metadata_test.py")
 
-    with jax._src.config.hlo_source_file_canonicalization_regex(".*/tests/"):
+    with jax_config.hlo_source_file_canonicalization_regex(r".*[\\/]+tests[/\\]+"):
       hlo = make_hlo()
       self.assertIn("metadata_test.py", hlo)
-      self.assertNotIn("tests/", hlo)
-      self.assertNotIn("/metadata_test.py", hlo)
+      self.assertNotRegex(hlo, r"tests[/\\]+")
+      self.assertNotRegex(hlo, r"[/\\]+metadata_test.py")
 
-    with jax._src.config.hlo_source_file_canonicalization_regex("no_match_xxx"):
+    with jax_config.hlo_source_file_canonicalization_regex("no_match_xxx"):
       hlo = make_hlo()
-      self.assertIn("/tests/metadata_test.py", hlo)
+      self.assertRegex(hlo, r"[/\\]+tests[/\\]+metadata_test.py")
 
-    with jax._src.config.hlo_source_file_canonicalization_regex(".*"):
+    with jax_config.hlo_source_file_canonicalization_regex(".*"):
       hlo = make_hlo()
       self.assertNotIn("test.py", hlo)
 
-    with jax._src.config.hlo_source_file_canonicalization_regex("test"):
+    with jax_config.hlo_source_file_canonicalization_regex("test"):
       hlo = make_hlo()
-      self.assertIn("/s/metadata_.py", hlo)
+      self.assertRegex(hlo, r"[/\\]+s[/\\]+metadata_.py")
+
 
 if __name__ == "__main__":
   absltest.main(testLoader=jtu.JaxTestLoader())

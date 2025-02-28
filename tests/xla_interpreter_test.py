@@ -1,4 +1,4 @@
-# Copyright 2021 Google LLC
+# Copyright 2021 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@ from absl.testing import absltest
 
 import jax
 from jax._src import test_util as jtu
-from jax._src import dispatch
+from jax._src.interpreters import pxla
 
 
 class XlaInterpreterTest(jtu.JaxTestCase):
@@ -26,7 +26,7 @@ class XlaInterpreterTest(jtu.JaxTestCase):
       return args[0]
 
     closed_jaxpr = jax.make_jaxpr(f)(*range(10))
-    pruned_jaxpr, kept_const_idx, kept_var_idx = dispatch._prune_unused_inputs(
+    pruned_jaxpr, kept_const_idx, kept_var_idx = pxla.prune_unused_inputs(
         closed_jaxpr.jaxpr)
     assert len(pruned_jaxpr.invars) == 1
     assert kept_const_idx == set()
