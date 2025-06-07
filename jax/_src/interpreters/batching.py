@@ -111,7 +111,7 @@ def _jumble_unflatten(aval, x):
 register_pytree_node(Jumble, _jumble_flatten, _jumble_unflatten)
 
 def _jumble_result(axis_size, stacked_axis, ragged_axes, x):
-  binder = core.Var('', core.ShapedArray((), np.dtype('int32')))
+  binder = core.Var(core.ShapedArray((), np.dtype('int32')))
   if stacked_axis != 0:
     raise NotImplementedError  # TODO Transpose x so the stacked axis is axis 0
   shape = list(x.shape)
@@ -175,7 +175,7 @@ def bdim_as_shape(
     bdim: int | RaggedAxis, data_shape: core.Shape) -> core.Shape:
   if isinstance(bdim, RaggedAxis):
     result = list(data_shape)
-    binder = core.Var('', core.ShapedArray((), np.dtype('int32')))
+    binder = core.Var(core.ShapedArray((), np.dtype('int32')))
     for ragged_axis, segment_lens in bdim.ragged_axes:
       result[ragged_axis] = IndexedAxisSize(binder, segment_lens)
     return tuple(result)
@@ -585,14 +585,21 @@ class BatchTrace(Trace):
     fun, out_dims1 = batch_subtrace(fun, self.tag, self.axis_data, in_dims)
     fwd, out_dims2 = batch_subtrace(fwd, self.tag, self.axis_data, fwd_in_dims)
 
-    bwd = batch_custom_vjp_bwd(bwd, self.tag, self.axis_data, out_dims2, in_dims)
+    def bwd_in_dims():
+      _, _, input_fwds = out_trees()
+      pruned_dims = iter(out_dims2())
+      full_dims = [next(pruned_dims) if f is None else in_dims[f] for f in input_fwds]
+      return [*full_dims, *pruned_dims]
+
+    bwd = batch_custom_vjp_bwd(bwd, self.tag, self.axis_data, bwd_in_dims, in_dims)
     out_vals = prim.bind_with_trace(self.parent_trace,
                                     (fun, fwd, bwd) + tuple(in_vals),
                                     dict(out_trees=out_trees, symbolic_zeros=symbolic_zeros))
     fst, out_dims = lu.merge_linear_aux(out_dims1, out_dims2)
     if not fst:
-      _, res_tree = out_trees()
-      _, out_dims = split_list(out_dims, [res_tree.num_leaves])
+      _, res_tree, input_fwds = out_trees()
+      num_res = res_tree.num_leaves - sum(f is not None for f in input_fwds)
+      _, out_dims = split_list(out_dims, [num_res])
     src = source_info_util.current()
     return [BatchTracer(self, v, d, src) for v, d in zip(out_vals, out_dims)]
 
@@ -1138,7 +1145,7 @@ def matchaxis(axis_name, sz, mesh_axis, src, dst, x, sum_match=False):
   if dst == jumble_axis:
     x = bdim_at_front(x, src, sz)
     elt_ty = x.aval.update(shape=x.shape[1:])
-    aval = JumbleTy(core.Var('', core.ShapedArray((), np.dtype('int32'))),
+    aval = JumbleTy(core.Var(core.ShapedArray((), np.dtype('int32'))),
                     x.shape[0], elt_ty)
     return Jumble(aval, x)
   try:

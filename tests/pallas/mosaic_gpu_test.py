@@ -2417,7 +2417,11 @@ class PallasCallSm90AWGTest(
 
 class PallasCallSm100ATest(PallasSm100ATest):
 
-  def test_tmem(self):
+  @parameterized.parameters(
+      (False,),
+      (True,),
+  )
+  def test_tmem(self, collective):
     self.skip_if_wg_semantics()  # TMEM read not wired up in the WG get rule.
     swizzle_elems = 128 // jnp.dtype(jnp.float32).itemsize
     transforms = (
@@ -2428,13 +2432,15 @@ class PallasCallSm100ATest(PallasSm100ATest):
         self.kernel,
         out_shape=jnp.zeros((128, 128), jnp.float32),
         scratch_shapes=[
-            plgpu.TMEM((128, 128), jnp.float32),
-            plgpu.TMEM((128, 128), jnp.float32),
+            plgpu.TMEM((128, 128), jnp.float32, collective=collective),
+            plgpu.TMEM((128, 128), jnp.float32, collective=collective),
             plgpu.SMEM((128, 128), jnp.float32, transforms=transforms),
             plgpu.Barrier(),
         ],
         num_threads=1,
         thread_name="x",
+        cluster=(2,) if collective else (),
+        cluster_names=("x",) if collective else (),
     )
     def kernel(x_ref, y_ref, tmem_ref, tmem_ref2, smem_ref, barrier_ref):
       plgpu.copy_gmem_to_smem(x_ref, smem_ref, barrier_ref)
@@ -2455,11 +2461,47 @@ class PallasCallSm100ATest(PallasSm100ATest):
     x_result = jax.block_until_ready(kernel(x))
     np.testing.assert_array_equal(x_result, x + 1)
 
+  def test_tmem_column_slicing(self):
+    self.skip_if_wg_semantics()
+    swizzle_elems = 128 // jnp.dtype(jnp.float32).itemsize
+    transforms = (
+        plgpu.TilingTransform((8, swizzle_elems)),
+        plgpu.SwizzleTransform(128),
+    )
+    @functools.partial(
+        self.kernel,
+        out_shape=jnp.zeros((128, 128), jnp.float32),
+        scratch_shapes=[
+            plgpu.TMEM((128, 256), jnp.float32),
+            plgpu.SMEM((128, 128), jnp.float32, transforms=transforms),
+            plgpu.Barrier(),
+        ],
+        num_threads=1,
+        thread_name="x",
+    )
+    def kernel(x_ref, y_ref, tmem_ref, smem_ref, barrier_ref):
+      plgpu.copy_gmem_to_smem(x_ref, smem_ref, barrier_ref)
+      plgpu.barrier_wait(barrier_ref)
+      x_val = plgpu.load(smem_ref, (), layout=plgpu.Layout.TCGEN05)
+      tmem_slice = tmem_ref.at[:, 8:208].at[:, 0:128]
+      tmem_slice[...] = x_val + 1
+      plgpu.commit_tmem()
+      smem_ref[...] = tmem_ref[:, 8:136]
+      plgpu.commit_smem()
+      plgpu.copy_smem_to_gmem(smem_ref, y_ref)
+      plgpu.wait_smem_to_gmem(0)
+
+    x = jax.random.uniform(
+        jax.random.key(0), shape=(128, 128), dtype=jnp.float32)
+    x_result = jax.block_until_ready(kernel(x))
+    np.testing.assert_array_equal(x_result, (x + 1)[:, 0:128])
+
   @parameterized.parameters(
       (jnp.sum,),
       (jnp.max,)
   )
   def test_reduce_with_tcgen05_layout(self, op):
+    self.skip_if_wg_semantics()
     axis = -1
     swizzle_elems = 128 // jnp.dtype(jnp.float32).itemsize
     transforms = (
@@ -2490,6 +2532,40 @@ class PallasCallSm100ATest(PallasSm100ATest):
         jax.random.key(0), shape=(128, 128), dtype=jnp.float32)
     x_result = jax.block_until_ready(kernel(x))
     np.testing.assert_allclose(x_result, op(x, axis=axis), atol=1e-5)
+
+  @parameterized.parameters((0,), (1,))
+  def test_broadcast_in_dim_tcgen05_layout(self, axis):
+    self.skip_if_wg_semantics()
+
+    @functools.partial(
+        self.kernel,
+        out_shape=jnp.zeros((128, 128), jnp.float32),
+        scratch_shapes=[
+            plgpu.SMEM((128,), jnp.float32),
+            plgpu.SMEM((128, 128), jnp.float32),
+            plgpu.Barrier(),
+        ],
+        num_threads=1,
+        thread_name="x",
+    )
+    def kernel(x_ref, y_ref, smem_ref, smem_out_ref, barrier_ref):
+      plgpu.copy_gmem_to_smem(x_ref, smem_ref, barrier_ref)
+      plgpu.barrier_wait(barrier_ref)
+      if axis == 0:
+        reduced = plgpu.load(smem_ref, (), layout=plgpu.Layout.TCGEN05_COL)
+      else:
+        reduced = plgpu.load(smem_ref, (), layout=plgpu.Layout.TCGEN05_ROW)
+      broadcasted = lax.broadcast_in_dim(reduced, (128, 128), [1 - axis])
+      smem_out_ref[...] = broadcasted
+      plgpu.commit_smem()
+      plgpu.copy_smem_to_gmem(smem_out_ref, y_ref)
+      plgpu.wait_smem_to_gmem(0)
+
+    x = jax.random.uniform(jax.random.key(0), shape=(128,), dtype=jnp.float32)
+    x_result = jax.block_until_ready(kernel(x))
+    expected = jnp.expand_dims(x, axis=axis)
+    expected = jnp.broadcast_to(expected, (128, 128))
+    np.testing.assert_array_equal(x_result, expected)
 
   @parameterized.product(shape=[(128, 128)],
                          swizzle=[128, 64, 32],
@@ -2685,6 +2761,70 @@ class PallasCallSm100ATest(PallasSm100ATest):
     result = f(x, y)
     expected = x @ y
     np.testing.assert_allclose(result, expected, rtol=1e-3)
+
+  def test_collective_partitioned_copy(self):
+    self.skip_if_wg_semantics()
+    block_size = (128, 128)
+    partitioned_block_size = (block_size[0] // 2, block_size[1])
+    a = jax.random.uniform(
+        jax.random.key(0), shape=block_size, dtype=jnp.float32)
+    b = jax.random.uniform(
+        jax.random.key(1), shape=block_size, dtype=jnp.float32)
+    def kernel(a_gmem, b_gmem, out_gmem,
+              a_smem, b_smem, out_smem,
+              a_tma_barrier, b_tma_barrier, cluster_barrier):
+      cluster_idx = lax.axis_index("x")
+      out_slice = pl.ds(cluster_idx * partitioned_block_size[0],
+                        partitioned_block_size[0])
+
+      @pl.core_map(plgpu.WarpMesh(axis_name="warp"))
+      def _per_warp():
+        warp_id = lax.axis_index("warp")
+        @pl.when(warp_id == 0)
+        def _():
+          plgpu.copy_gmem_to_smem(
+              a_gmem,
+              a_smem,
+              a_tma_barrier,
+              collective_axes="x",
+              partitioned_axis=0,
+          )
+          plgpu.copy_gmem_to_smem(
+              b_gmem,
+              b_smem,
+              b_tma_barrier,
+              collective_axes="x",
+              partitioned_axis=0,
+          )
+      # TODO(justinfu): Clean up this API where we need to explicitly wait
+      # only on the first block.
+      @pl.when(cluster_idx == 0)
+      def _():
+        plgpu.barrier_wait(a_tma_barrier)
+        plgpu.barrier_wait(b_tma_barrier)
+      plgpu.barrier_arrive(cluster_barrier)
+      plgpu.barrier_wait(cluster_barrier)
+      out_smem[...] = a_smem[...] + b_smem[...]
+      plgpu.copy_smem_to_gmem(out_smem, out_gmem.at[out_slice])
+      plgpu.wait_smem_to_gmem(0)
+    f = plgpu.kernel(
+        kernel,
+        out_shape=jax.ShapeDtypeStruct(block_size, jnp.float32),
+        grid=(1,),
+        grid_names=("_"),
+        cluster_names=("x",),
+        cluster=(2,),
+        scratch_shapes=(  # type: ignore
+            plgpu.SMEM(partitioned_block_size, jnp.float32),
+            plgpu.SMEM(partitioned_block_size, jnp.float32),
+            plgpu.SMEM(partitioned_block_size, jnp.float32),
+            plgpu.Barrier(num_arrivals=1),
+            plgpu.Barrier(num_arrivals=1),
+            plgpu.ClusterBarrier(collective_axes=("x",)),
+        ),
+    )
+    result = f(a, b)
+    np.testing.assert_array_equal(result, a + b)
 
 
 class PallasCallSm100AWGTest(

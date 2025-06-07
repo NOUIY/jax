@@ -461,6 +461,12 @@ class TiledLayout:
         new_vector_dim,
     )
 
+  def reduce(self, axes: Sequence[int]) -> TiledLayout:
+    reduced_layout = self
+    for a in sorted(axes, reverse=True):
+      reduced_layout = reduced_layout.remove_dimension(a)
+    return reduced_layout
+
 
 def _tiled_wgmma_layout(shape: tuple[int, ...]):
   """Returns the tiled layout relevant for WGMMA operations.
@@ -677,6 +683,30 @@ WGMMA_TRANSPOSED_LAYOUT = TiledLayout(
     warp_dim=-10,
     lane_dims=(-6, -3, -5),
     vector_dim=-2,
+)
+
+# Like WGMMA_LAYOUT, only each warp holds a 32xN strip instead of 16xN.
+TCGEN05_LAYOUT = TiledLayout(
+    Tiling(((128, 8), (32, 8), (8, 8), (1, 2))),
+    warp_dim=-8,
+    lane_dims=(-4, -3),
+    vector_dim=-1,
+)
+# TCGEN05_ROW_LAYOUT is to TCGEN05_LAYOUT as WGMMA_ROW_LAYOUT is to
+# WGMMA_LAYOUT.
+TCGEN05_ROW_LAYOUT = TiledLayout(
+    Tiling(tiles=((128,), (32,), (8,), (1,), (1,))),
+    warp_dim=-5,
+    lane_dims=(-3, Replicated(times=4)),
+    vector_dim=-1,
+)
+# TCGEN05_COL_LAYOUT is to TCGEN05_LAYOUT as WGMMA_COL_LAYOUT is to
+# WGMMA_LAYOUT.
+TCGEN05_COL_LAYOUT = TiledLayout(
+    Tiling(tiles=((8,), (8,), (8,), (2,))),
+    warp_dim=Replicated(times=4),
+    lane_dims=(Replicated(times=8), -2),
+    vector_dim=-1,
 )
 
 @jax.tree_util.register_pytree_node_class
@@ -1544,30 +1574,27 @@ class FragmentedArray:
           _registers=new_registers, _layout=self.layout, _is_signed=is_signed
       )
     # TODO(bchetioui): handle conversions to/from other float8 types.
-    if cur_dtype == f32 and new_dtype == f8e4m3fn:
+    if cur_dtype in {bf16, f32} and new_dtype == f8e4m3fn:
       if vector_len != 2:
         raise NotImplementedError(vector_len)
       new_registers = np.empty_like(self.registers)
-      empty_vec_32 = llvm.mlir_undef(ir.VectorType.get((1,), i32))
-      empty_result_vec = llvm.mlir_undef(ir.VectorType.get((2,), i8))
+      empty_vec_16 = llvm.mlir_undef(ir.VectorType.get((1,), i16))
       for idx, reg in np.ndenumerate(self.registers):
         e0 = vector.extractelement(reg, position=c(0, index))
         e1 = vector.extractelement(reg, position=c(1, index))
-        new_reg_32 = llvm.inline_asm(
-            i32,
+        # TODO(bchetioui): can we do faster than this?
+        if cur_dtype == bf16:
+          e0 = arith.extf(f32, e0)
+          e1 = arith.extf(f32, e1)
+        new_reg_16 = llvm.inline_asm(
+            i16,
             [e1, e0],
             "cvt.rn.satfinite.e4m3x2.f32 $0, $1, $2;",
             "=h,f,f",
         )
-        new_vec_32 = llvm.insertelement(empty_vec_32, new_reg_32, c(0, i32))
-        new_vec_f8 = vector.bitcast(ir.VectorType.get((4,), i8), new_vec_32)
-        res = llvm.insertelement(
-            empty_result_vec,
-            vector.extractelement(new_vec_f8, position=c(0, i32)), c(0, i32))
-        res = llvm.insertelement(
-            res,
-            vector.extractelement(new_vec_f8, position=c(1, i32)), c(1, i32))
-        new_registers[idx] = vector.bitcast(ir.VectorType.get((2,), f8e4m3fn), res)
+        new_registers[idx] = vector.bitcast(
+            ir.VectorType.get((2,), f8e4m3fn),
+            llvm.insertelement(empty_vec_16, new_reg_16, c(0, i32)))
       return FragmentedArray(
           _registers=new_registers, _layout=self.layout, _is_signed=is_signed
       )
@@ -1825,9 +1852,7 @@ class FragmentedArray:
       out_reg = vector.extractelement(out_reg, position=c(0, index))
       out_regs = np.asarray(out_reg, dtype=object)
     else:
-      reduced_layout = layout
-      for a in sorted(axis, reverse=True):
-        reduced_layout = reduced_layout.remove_dimension(a)
+      reduced_layout = layout.reduce(axis)
       out_regs = out_regs.reshape(reduced_layout.registers_shape(reduced_logical_shape))
     return FragmentedArray(
         _registers=out_regs, _layout=reduced_layout, _is_signed=self.is_signed
@@ -1866,11 +1891,15 @@ class FragmentedArray:
     )
 
   def broadcast_minor(self, n):
-    if self.layout != WGMMA_ROW_LAYOUT:
-      raise NotImplementedError
+    if self.layout == WGMMA_ROW_LAYOUT:
+      output_layout = WGMMA_LAYOUT
+    elif self.layout == TCGEN05_ROW_LAYOUT:
+      output_layout = TCGEN05_LAYOUT
+    else:
+      raise NotImplementedError(self.layout)
     if n % 8:
       raise ValueError("Number of columns must be divisible by 8")
-    reg_shape = WGMMA_LAYOUT.registers_shape((self.shape[0], n))
+    reg_shape = output_layout.registers_shape((self.shape[0], n))
     new_regs = np.empty(reg_shape, dtype=object)
     dtype = self.mlir_dtype
     i0 = arith.constant(ir.IndexType.get(), 0)
@@ -1879,26 +1908,30 @@ class FragmentedArray:
       tile[0] = row_tile
       tile[4] = row_subtile
       new_regs[tuple(tile)] = vector.splat(
-          ir.VectorType.get((WGMMA_LAYOUT.vector_length,), dtype),
+          ir.VectorType.get((output_layout.vector_length,), dtype),
           vector.extractelement(reg, position=i0),
       )
     return FragmentedArray(
-        _registers=new_regs, _layout=WGMMA_LAYOUT, _is_signed=self.is_signed
+        _registers=new_regs, _layout=output_layout, _is_signed=self.is_signed
     )
 
   def broadcast_major(self, m):
-    if self.layout != WGMMA_COL_LAYOUT:
-      raise NotImplementedError
+    if self.layout == WGMMA_COL_LAYOUT:
+      output_layout = WGMMA_LAYOUT
+    elif self.layout == TCGEN05_COL_LAYOUT:
+      output_layout = TCGEN05_LAYOUT
+    else:
+      raise NotImplementedError(self.layout)
     if m % 64:
       raise ValueError("Number of rows must be divisible by 64")
-    reg_shape = WGMMA_LAYOUT.registers_shape((m, self.shape[0]))
+    reg_shape = output_layout.registers_shape((m, self.shape[0]))
     new_regs = np.empty(reg_shape, dtype=object)
     for (col_tile, *_), reg in np.ndenumerate(self.registers):
       tile = [slice(None)] * len(new_regs.shape)
       tile[1] = col_tile
       new_regs[tuple(tile)] = reg
     return FragmentedArray(
-        _registers=new_regs, _layout=WGMMA_LAYOUT, _is_signed=self.is_signed
+        _registers=new_regs, _layout=output_layout, _is_signed=self.is_signed
     )
 
   def select(self, on_true, on_false):

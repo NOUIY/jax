@@ -20,7 +20,6 @@ annotated with layouts (see `layout_inference.py` for the relevant pass).
 
 from collections.abc import Callable
 from functools import partial
-import itertools
 from typing import cast
 
 from jax._src.lib import mosaic_gpu_dialect as mgpu
@@ -375,16 +374,6 @@ def _infer_memref_cast_transforms(
   return [transforms], [transforms]
 
 
-def _should_have_transforms(op: ir.OpView) -> bool:
-  """Returns 'True' if the operation should be assigned in/out transforms."""
-  return any(
-      map(
-          inference_utils.is_transformable_smem_memref,
-          itertools.chain(op.operands, op.results),
-      )
-  )
-
-
 def infer_transforms(module: ir.Module):
   """Infers transforms for the given module.
 
@@ -398,7 +387,7 @@ def infer_transforms(module: ir.Module):
   annotate the same memref.
   """
   def inference_step(op: ir.Operation):
-    if not _should_have_transforms(op):
+    if not inference_utils.should_have_transforms(op):
       return
     elif inference_rule := _transform_inference_rules.get(op.OPERATION_NAME, None):  # pytype: disable=attribute-error
       pass
@@ -421,4 +410,30 @@ def infer_transforms(module: ir.Module):
   for op in module.body:
     inference_utils.traverse_op(
         op, inference_step, inference_utils.TraversalOrder.FORWARD
+    )
+
+  # All ops that should have transforms but have no transforms inferred so far
+  # are assigned an empty sets of transforms. E.g., this happens in kernels with
+  # only pointwise operations.
+  def set_empty_transforms(op: ir.Operation):
+    if (
+        inference_utils.should_have_transforms(op)
+        and not inference_utils.has_in_transforms_set(op)
+        and not inference_utils.has_out_transforms_set(op)
+    ):
+      ins = [
+          ir.ArrayAttr.get([])
+          for o in op.operands
+          if inference_utils.is_transformable_smem_memref(o)
+      ]
+      outs = [
+          ir.ArrayAttr.get([])
+          for r in op.results
+          if inference_utils.is_transformable_smem_memref(r)
+      ]
+      _set_transform_attributes(op, ins, outs)
+
+  for op in module.body:
+    inference_utils.traverse_op(
+        op, set_empty_transforms, inference_utils.TraversalOrder.FORWARD
     )

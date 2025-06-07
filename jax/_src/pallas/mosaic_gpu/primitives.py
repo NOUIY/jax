@@ -115,7 +115,12 @@ def _load_p_lowering_rule(
             val, shape=(), layout=layout, is_signed=is_signed
         )
       match layout:
-        case mgpu.WGMMA_ROW_LAYOUT | mgpu.WGMMA_COL_LAYOUT:
+        case (
+            mgpu.WGMMA_ROW_LAYOUT
+            | mgpu.WGMMA_COL_LAYOUT
+            | mgpu.TCGEN05_ROW_LAYOUT
+            | mgpu.TCGEN05_COL_LAYOUT
+        ):
           return mgpu.FragmentedArray.load_untiled(
               x_ref,
               is_signed=is_signed,
@@ -482,6 +487,7 @@ def _copy_gmem_to_smem_lowering(
     dst_transforms_treedef,
     barrier_transforms_treedef,
     collective_axes,
+    partitioned_axis,
     for_warpgroup: bool = True,
 ):
   flat_src_transforms, flat_dst_transforms, flat_barrier_transforms = (
@@ -530,6 +536,10 @@ def _copy_gmem_to_smem_lowering(
       # arrive with the whole transfer size, while everyone else arrives with 0.
       # But we should continue using this scheme as it's likely to be faster.
       bytes //= WARPGROUP_SIZE
+      if collective and partitioned_axis is not None:
+        raise NotImplementedError(
+            "Collective partitioned copies not implemented."
+        )
       if ctx.module_ctx.auto_barriers:
         mgpu.warpgroup_barrier()  # Make sure all reads have completed.
       barrier.arrive_expect_tx(bytes)
@@ -537,9 +547,32 @@ def _copy_gmem_to_smem_lowering(
       # In Warp-level lowering, we arrive on each CUDA thread in a warp, but
       # the barrier still expects a full 128 arrivals so we arrive 4 times
       # on each CUDA thread instead.
-      bytes //= WARP_SIZE
-      barrier.arrive(arrival_count=3, can_complete=False)
-      barrier.arrive_expect_tx(bytes)
+      # TODO(justinfu): The arrival counts are wrong if called outside of a
+      # single warp. Figure out how to guard against this in user code.
+      bytes = bytes // WARP_SIZE
+      if collective and partitioned_axis is not None:
+        if len(collective) != 1:
+          raise ValueError(
+              f"Expected exactly one collective axis, got {collective_axes=}"
+          )
+        if math.prod(ctx.launch_ctx.cluster_size) != 2:
+          raise NotImplementedError(
+              "Partitioned loads only supported for clusters of size 2"
+          )
+        # Bytes is the destination size, which is only half of the total
+        # size of the partitioned transfer so we need to double it.
+        bytes *= 2
+        first_block = arith_dialect.cmpi(
+            arith_dialect.CmpIPredicate.eq,
+            ctx.launch_ctx.cluster_idx(collective[0]),
+            mgpu.c(0, ir.IndexType.get()),
+        )
+        with mgpu.when(first_block):
+          barrier.arrive(arrival_count=3, can_complete=False)
+          barrier.arrive_expect_tx(bytes)
+      else:
+        barrier.arrive(arrival_count=3, can_complete=False)
+        barrier.arrive_expect_tx(bytes)
 
     ctx.launch_ctx.async_copy(
         src_ref=src,
@@ -548,6 +581,7 @@ def _copy_gmem_to_smem_lowering(
         arrive=False,
         predicate=ctx.module_ctx.single_lane_predicate,
         collective=collective,
+        partitioned=partitioned_axis,
         **copy_params,
     )
     return ()
@@ -590,8 +624,32 @@ def copy_gmem_to_smem(
     barrier: _Ref,
     *,
     collective_axes: str | tuple[str, ...] | None = None,
+    partitioned_axis: int | None = None,
 ) -> None:
   """Asynchronously copies a GMEM reference to a SMEM reference.
+
+  If collective_axes is specified, this performs a multicast copy where
+  all CUDA blocks that share the same index along the collective axis
+  receive a copy of the same block of data loaded from `dst` to `src`.
+
+  If both collective_axes and partitioned_axis are specified, this will perform
+  a partitioned collective copy where each block in the cluster will receive
+  a tile of `transfer_size // cluster_size` data from the `src` Ref.
+  For example, if `src` has a shape of (256, 256) and a partitioned
+  copy is performed along axis 0 with cluster size 2, then the first block will
+  receive `src[0:128, :]` and the second will receive `src[128:256, :]`.
+  NOTE: Only the first block in the cluster will arrive on the barrier,
+  and an additional cluster barrier is necessary to ensure that all blocks in
+  the cluster have finished the copy.
+
+  Args:
+    src: The source Ref. Must be in GMEM.
+    dst: The destination Ref. Must be in SMEM.
+    barrier: The barrier to use for tracking completion of the copy.
+    collective_axes: The collective axes to use for the copy.
+    partitioned_axis: Indicates which array axis along the src/dst Refs to
+     partition across during a partitioned collective copy. Requires
+     collective_axes to also be specified.
 
   See also:
     :func:`jax.experimental.mosaic.gpu.barrier_arrive`
@@ -628,6 +686,7 @@ def copy_gmem_to_smem(
       dst_transforms_treedef=dst_transforms_treedef,
       barrier_transforms_treedef=barrier_transforms_treedef,
       collective_axes=collective_axes,
+      partitioned_axis=partitioned_axis,
   )
   return None
 
@@ -1260,12 +1319,15 @@ def _tcgen05_mma_abstract_eval(acc, a, b, barrier, accumulate,
     raise ValueError("RHS must be an SMEM Ref.")
 
   if collective_axis is not None:
-    if not acc.collective:
+    # TODO(justinfu): If under a core_map, the avals for acc/a
+    # become normal MemRefs so we cannot check if they are collective.
+    # Figure out a way to fix this.
+    if isinstance(acc, gpu_core.AbstractTMEMRef) and not acc.collective:
       raise ValueError(
           "Accumulator Ref must be collective if collective_axis is set.")
-    if a.memory_space == gpu_core.TMEM and not a.collective:
+    if isinstance(a, gpu_core.AbstractTMEMRef) and not a.collective:
       raise ValueError(
-          "LHS TMEM Ref must be collective if collective_axis is set.")
+          "LHS Ref must be collective if collective_axis is set.")
 
   for_tensor_core = getattr(
       barrier.inner_aval.dtype, "for_tensor_core", False)
@@ -1452,6 +1514,7 @@ class Layout(enum.Enum):
 
   TCGEN05 = enum.auto()
   TCGEN05_ROW = enum.auto()
+  TCGEN05_COL = enum.auto()
 
   def __call__(self, *args, **kwargs) -> ParameterizedLayout:
     return ParameterizedLayout(self, args, kwargs)
@@ -1484,6 +1547,9 @@ class Layout(enum.Enum):
       case Layout.TCGEN05_ROW:
         check_no_args()
         return mgpu.TCGEN05_ROW_LAYOUT
+      case Layout.TCGEN05_COL:
+        check_no_args()
+        return mgpu.TCGEN05_COL_LAYOUT
 
 @dataclasses.dataclass(frozen=True)
 class ParameterizedLayout:
