@@ -23,12 +23,12 @@ from typing import Any, overload
 
 import numpy as np
 
-import jax
 from jax._src import core
 from jax._src import dispatch
 from jax._src import effects
 from jax._src import util
 from jax._src import xla_bridge
+from jax._src.hashable_array import HashableArray
 from jax._src.interpreters import ad
 from jax._src.interpreters import batching
 from jax._src.interpreters import mlir
@@ -559,24 +559,6 @@ def _unwrap_kwargs_hashable(kwargs: Sequence[tuple[str, Any]]) -> dict[str, Any]
   return unwrapped_kwargs
 
 
-class HashableArray:
-  __slots__ = ["val"]
-
-  def __init__(self, val):
-    assert isinstance(val, np.ndarray)
-    self.val = np.copy(val)
-    self.val.setflags(write=False)
-
-  def __repr__(self):
-    return f"HashableArray({self.val})"
-
-  def __hash__(self):
-    return hash((self.val.shape, self.val.dtype, self.val.tobytes()))
-
-  def __eq__(self, other):
-    return isinstance(other, HashableArray) and np.array_equal(self.val, other.val)
-
-
 class HashableDict:
   __slots__ = ["val"]
 
@@ -662,6 +644,9 @@ def ffi_batching_rule(
     result_avals: Sequence[core.ShapedArray],
     **kwargs: Any,
 ):
+  from jax._src.lax import control_flow  # pytype: disable=import-error
+  from jax._src.lax import lax  # pytype: disable=import-error
+
   axis_size, = {a.shape[d] for a, d in zip(args, dims)
                 if d is not batching.not_mapped}
   new_args = [arg if dim is batching.not_mapped else
@@ -696,7 +681,7 @@ def ffi_batching_rule(
   elif vmap_method == "expand_dims" or vmap_method == "broadcast_all":
     size = axis_size if vmap_method == "broadcast_all" else 1
     bcast_args = [
-        jax.lax.broadcast(x, (size,)) if d is batching.not_mapped else x
+        lax.broadcast(x, (size,)) if d is batching.not_mapped else x
         for x, d in zip(new_args, dims)]
     if kwargs.get("input_layouts") is not None:
       kwargs["input_layouts"] = tuple(
@@ -721,7 +706,7 @@ def ffi_batching_rule(
       )
     unroll = vmap_method == "sequential_unrolled"
     g = lambda _, x: ((), _batch_fun(x))
-    _, outvals = jax.lax.scan(g, (), batched_args, unroll=unroll)
+    _, outvals = control_flow.scan(g, (), batched_args, unroll=unroll)
   else:
     raise NotImplementedError(
         f"vmap is only supported for the {prim.name} primitive when vmap_method "

@@ -22,6 +22,7 @@ from jax._src import config
 from jax._src import core
 from jax._src import dtypes
 from jax._src.api import jit, named_call
+from jax._src.export import shape_poly
 from jax._src.lax import lax
 from jax._src.lax.lax import PrecisionLike
 from jax._src.numpy import util
@@ -553,12 +554,12 @@ def _einsum(
           dot_general_out_sharding = None
         elif out_sharding is not None and names != result_names:
           if len(result_names) > len(out_sharding.spec):
-            out_sharding = out_sharding.with_spec(
+            out_sharding = out_sharding.update(spec=
                 out_sharding.spec._normalized_spec_for_aval(len(result_names)))
           spec = out_sharding.spec
           inverse_spec = tuple(spec[result_names.index(name)] for name in names)
           dot_general_out_sharding = NamedSharding(
-              out_sharding.mesh, spec.with_partitions(inverse_spec))
+              out_sharding.mesh, spec.update(partitions=inverse_spec))
         else:
           dot_general_out_sharding = out_sharding  # type: ignore
         dimension_numbers = ((lhs_cont, rhs_cont), (lhs_batch, rhs_batch))
@@ -581,3 +582,5 @@ def _einsum(
 
   return lax._convert_element_type(operands[0], preferred_element_type,
                                    output_weak_type)
+
+_poly_einsum_handlers[shape_poly._DimExpr] = shape_poly._einsum_contract_path

@@ -756,12 +756,17 @@ class BarrierRef:
   num_barriers: int
 
   @staticmethod
-  def initialize(address: ir.Value, num_barriers: int, arrival_count: int = 1) -> "BarrierRef":
+  def initialize(barrier_memref: ir.Value, arrival_count: int = 1) -> "BarrierRef":
+    barrier_ty = ir.MemRefType(barrier_memref.type)
+    [num_barriers] = barrier_ty.shape
     if num_barriers > 32:
       raise NotImplementedError("Only up to 32 barriers per group supported")
     i32 = ir.IntegerType.get_signless(32)
     i64 = ir.IntegerType.get_signless(64)
     ptr = ir.Type.parse(f"!llvm.ptr<{WORKGROUP_NVPTX_ADDRESS_SPACE}>")
+    address = memref_ptr(
+        barrier_memref, memory_space=WORKGROUP_NVPTX_ADDRESS_SPACE
+    )
     phases = memref.alloca(ir.MemRefType.get((), i32), [], [])
     memref.store(c(0, i32), phases, [])
     with single_thread(scope=ThreadSubset.BLOCK):
@@ -867,15 +872,16 @@ class DialectBarrierRef:
 
   @staticmethod
   def initialize(
-      address: ir.Value,
-      num_barriers: int,
+      barrier_memref: ir.Value,
       arrival_count: int = 1,
   ) -> "DialectBarrierRef":
+    barrier_ty = ir.MemRefType(barrier_memref.type)
+    [num_barriers] = barrier_ty.shape
     if num_barriers > 32:
       raise NotImplementedError("Only up to 32 barriers per group supported")
 
-    barrier_ty = ir.MemRefType.get(
-        (num_barriers,), ir.Type.parse("!mosaic_gpu.barrier")
+    address = memref_ptr(
+        barrier_memref, memory_space=WORKGROUP_NVPTX_ADDRESS_SPACE
     )
     dialect.InitializeBarrierOp(
         barrier_ty, base_pointer=address, arrival_count=arrival_count
@@ -957,8 +963,7 @@ class CollectiveBarrierRef:
 
   @staticmethod
   def initialize(
-      address: ir.Value,
-      num_barriers: int,
+      barrier_memref: ir.Value,
       dims: Sequence[gpu.Dimension | Sequence[gpu.Dimension]],
       cluster_shape: tuple[int, int, int],
   ) -> "CollectiveBarrierRef":
@@ -986,7 +991,7 @@ class CollectiveBarrierRef:
         cluster_mask = arith.ori(
             cluster_mask, cluster_collective_mask(cluster_shape, d)
         )
-    barrier = BarrierRef.initialize(address, num_barriers, arrival_count=arrival_count)
+    barrier = BarrierRef.initialize(barrier_memref, arrival_count=arrival_count)
     return CollectiveBarrierRef(barrier, cluster_mask)
 
   def __iter__(self):
@@ -1493,3 +1498,43 @@ def vector_concat(vectors: Sequence[ir.Value]) -> ir.Value:
       result = vector.insertelement(elem, result, position=c(offset + i, index))
     offset += vty.shape[0]
   return result
+
+
+def is_known_divisible(value, divisor, max_depth=10) -> bool:
+  """Returns True if the value is statically known to be divisible by the divisor."""
+  if divisor == 1:
+    return True
+  if max_depth < 0 or not isinstance(value.owner, ir.Operation):
+    return False
+
+  new_depth = max_depth - 1
+  def_op = value.owner.opview
+
+  match def_op:
+    case arith.IndexCastOp():
+      return is_known_divisible(value.owner.operands[0], divisor, max_depth - 1)
+    case arith.ConstantOp():
+      return ir.IntegerAttr(def_op.value).value % divisor == 0
+    case arith.MulIOp():
+      # Only cover the case where one operand is divisible. It's still possible
+      # that the final product is divisible, but we don't check that here.
+      return (is_known_divisible(value.owner.operands[0], divisor, new_depth) or
+              is_known_divisible(value.owner.operands[1], divisor, new_depth))
+    case arith.SelectOp():
+      return (is_known_divisible(value.owner.operands[1], divisor, new_depth) and
+              is_known_divisible(value.owner.operands[2], divisor, new_depth))
+    case arith.MaxSIOp() | arith.MinSIOp() | arith.MaxUIOp() | arith.MinUIOp():
+      return (is_known_divisible(value.owner.operands[0], divisor, new_depth) and
+              is_known_divisible(value.owner.operands[1], divisor, new_depth))
+    case arith.AddIOp() | arith.SubIOp():
+      # Only cover the common case where both operads are divisible.
+      return (is_known_divisible(value.owner.operands[0], divisor, new_depth) and
+              is_known_divisible(value.owner.operands[1], divisor, new_depth))
+    case arith.AndIOp():
+      # Only cover the specific case where the divisor is a power of two.
+      return divisor.bit_count() == 1 and (
+          is_known_divisible(value.owner.operands[0], divisor, new_depth)
+          or is_known_divisible(value.owner.operands[1], divisor, new_depth)
+      )
+
+  return False

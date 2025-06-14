@@ -616,15 +616,17 @@ def _split_leading(sz, x):
 def _concat(a, b): return lax.concatenate([a, b], 0)
 
 def _empty_array(prefix, length_spec, aval):
-  sharding = aval.sharding.with_spec((*length_spec, *aval.sharding.spec))
+  sharding = aval.sharding.update(spec=(*length_spec, *aval.sharding.spec))
   empty = core.pvary(lax.empty(aval.dtype), tuple(aval.vma))
   return lax.broadcast(empty, (*prefix, *aval.shape), out_sharding=sharding)
 
 eval_jaxpr_p = core.Primitive('eval_jaxpr')
 eval_jaxpr_p.multiple_results = True
-def _stage_jaxpr(trace: pe.JaxprTrace, *tracers, jaxpr: core.ClosedJaxpr):
+def _stage_jaxpr(trace: pe.DynamicJaxprTrace, source_info, *tracers,
+                 jaxpr: core.ClosedJaxpr):
   params = dict(call_jaxpr=jaxpr)
-  return trace.default_process_primitive(core.closed_call_p, tracers, params)
+  return trace.default_process_primitive(core.closed_call_p, tracers, params,
+                                         source_info=source_info)
 pe.custom_staging_rules[eval_jaxpr_p] = _stage_jaxpr
 
 @eval_jaxpr_p.def_effectful_abstract_eval  # abstract eval only used for jax2tf
@@ -1512,17 +1514,6 @@ def _scan_state_partial_discharge_rule(should_discharge, in_avals, out_avals, *a
   assert len(refs_out_matching_in_avals) == len(in_avals)
   return refs_out_matching_in_avals, [*carry_out, *ys]
 
-def _scan_staging(trace, *args, **params):
-  outs = trace.default_process_primitive(scan_p, args, params)
-  jaxpr = params['jaxpr']
-  trace.frame.is_high = jaxpr.jaxpr.is_high
-  invars = [trace.frame.tracer_to_var[id(t)] for t in args]
-  var_map = dict(zip(jaxpr.jaxpr.invars, invars))
-  final_env = {var_map[v]: ty for v, ty in
-               jaxpr.jaxpr.final_typechange_env.items()}
-  trace.frame.current_typechange_env.update(final_env)
-  return outs
-
 scan_p = core.Primitive("scan")
 scan_p.multiple_results = True
 scan_p.skip_canonicalization = True
@@ -1541,37 +1532,32 @@ pe.partial_eval_jaxpr_custom_rules[scan_p] = _scan_partial_eval_custom
 pe.padding_rules[scan_p] = _scan_padding_rule
 pe.dce_rules[scan_p] = _scan_dce_rule
 state_discharge.register_partial_discharge_rule(scan_p)(_scan_state_partial_discharge_rule)
-pe.custom_staging_rules[scan_p] = _scan_staging
 
 def _is_high(jaxpr, **_) -> bool:
   return jaxpr.jaxpr.is_high
 scan_p.is_high = _is_high  # type: ignore
 
 def _to_lojax(*hi_args, jaxpr, num_carry, num_consts, linear, **params):
-  ienv, fenv = jaxpr.jaxpr.initial_typechange_env, jaxpr.jaxpr.final_typechange_env
 
   # move box binders and hi_args from consts slots to carry slots
-  to_move = [t.mutable for t in jaxpr.in_avals[:num_consts]]
+  to_move = [t.has_qdd for t in jaxpr.in_aval_qdds[:num_consts]]
   jaxpr = pe.move_invars_right(jaxpr, to_move)
   hi_args = _move_right(hi_args, to_move)
   num_consts -= sum(to_move)
   num_carry += sum(to_move)
 
   # expand num_consts, num_carry, linear according to lo types
-  const_invars, carry_invars, _ = split_list(jaxpr.jaxpr.invars, [num_consts, num_carry])
-  num_consts = sum(len(v.aval.lo_ty() if not v.aval.mutable
-                       else v.aval.lo_ty_(ienv[v])) for v in const_invars)
-  num_carry = sum(len(v.aval.lo_ty() if not v.aval.mutable
-                      else v.aval.lo_ty_(ienv[v])) for v in carry_invars)
-  linear = [l for v, l_ in zip(jaxpr.jaxpr.invars, linear)
-            for l in (l_,) * len(v.aval.lo_ty() if not v.aval.mutable
-                                 else v.aval.lo_ty_(ienv[v]))]
-  lo_muts_out = sum(len(m.leaf_avals) for m in fenv.values())  # TODO hardcoded
+  const_in_avals, carry_in_avals, _ = split_list(jaxpr.in_aval_qdds, [num_consts, num_carry])
+  num_consts = sum(len(aval.lo_ty()) for aval in const_in_avals)
+  num_carry = sum(len(aval.lo_ty()) for aval in carry_in_avals)
+  linear = [l for aval, l_ in zip(jaxpr.in_aval_qdds, linear)
+            for l in (l_,) * len(aval.lo_ty())]
+  lo_muts_out = sum(len(aval.lo_ty()) for aval in jaxpr.final_aval_qdds if aval.has_qdd)
 
-  # collect lo inputs values
-  lo_args = [lo_val for v, x in zip(jaxpr.jaxpr.invars, hi_args)
-             for lo_val in (v.aval.read_loval(ienv[v], x) if v.aval.mutable
-                            else v.aval.lower_val(x))]
+  # collect lo input values
+  lo_args = [lo_val for aval, x in zip(jaxpr.in_aval_qdds, hi_args)
+             for lo_val in (aval.read_loval(x) if aval.has_qdd
+                            else aval.lower_val(x))]
 
   # lower the jaxpr and bind it using lo input values
   lo_jaxpr = pe.lower_jaxpr(jaxpr)
@@ -1582,9 +1568,13 @@ def _to_lojax(*hi_args, jaxpr, num_carry, num_consts, linear, **params):
   # collect and apply mutations
   out_mut_ = iter(out_mut)
   in_idx = {v: i for i, v in enumerate(jaxpr.jaxpr.invars)}
-  for var, ty in jaxpr.jaxpr.final_typechange_env.items():
-    lo_vals = it.islice(out_mut_, len(var.aval.lo_ty_(ty)))
-    var.aval.update_from_loval(ty, hi_args[in_idx[var]], *lo_vals)
+
+  for v in jaxpr.jaxpr.invars:
+    if v.final_qdd is not None:
+      qdd = v.final_qdd
+      lo_vals = it.islice(out_mut_, len(v.aval.lo_ty_qdd(qdd)))
+      v.aval.update_from_loval(qdd, hi_args[in_idx[v]], *lo_vals)
+
   assert next(out_mut_, None) is None
 
   # collect output values into hi types
@@ -2175,7 +2165,7 @@ def _while_lowering(ctx, *args, cond_jaxpr, body_jaxpr, cond_nconsts,
           primitive=None,
           avals_in=[pred_aval],
           avals_out=[pred_aval.update(
-              shape=(), sharding=pred_aval.sharding.with_spec(()))],
+              shape=(), sharding=pred_aval.sharding.update(spec=()))],
           tokens_in=mlir.TokenSet(),
           tokens_out=None)
       pred, = lax._unary_reduce_lower(
@@ -2519,7 +2509,7 @@ def _scan_leaf(leaf, batch_elems, num_batches, batch_size):
         '0th dimension of leaf passed to `jax.lax.map` should be replicated.'
         f' Got {aval.str_short(True, True)}')
   if get_abstract_mesh()._are_all_axes_explicit:
-    out_s = aval.sharding.with_spec(P(None, None, *aval.sharding.spec[1:]))
+    out_s = aval.sharding.update(spec=P(None, None, *aval.sharding.spec[1:]))
     return auto_axes(f, out_sharding=out_s)(leaf)
   return f(leaf)
 
@@ -2622,7 +2612,7 @@ def _rng_bit_generator_batching_rule(batched_args, batch_dims, *, shape, dtype,
         out_sharding=out_sharding), (None, None)
   keys = batching.moveaxis(keys, bd, 0)
   batch_size = keys.shape[0]
-  out_s = (out_sharding.with_spec((keys.aval.sharding.spec[0], *out_sharding.spec))
+  out_s = (out_sharding.update(spec=(keys.aval.sharding.spec[0], *out_sharding.spec))
            if out_sharding is not None else None)
   key = keys[0]
   new_key, bits = lax.rng_bit_generator_p.bind(
@@ -2667,6 +2657,9 @@ def associative_scan(fn: Callable, elems, reverse: bool = False, axis: int = 0):
     result of recursively applying ``fn`` to combine the first ``k`` elements
     of ``elems`` along ``axis``. For example, given ``elems = [a, b, c, ...]``,
     the result would be ``[a, fn(a, b), fn(fn(a, b), c), ...]``.
+
+    If ``elems = [..., x, y, z]`` and ``reverse`` is true, the result is
+    ``[..., f(f(z, y), x), f(z, y), z]``.
 
   Example 1: partial sums of an array of numbers:
 

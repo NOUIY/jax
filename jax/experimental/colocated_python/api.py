@@ -16,24 +16,46 @@
 from __future__ import annotations
 
 import collections
-from typing import Any, Callable, Sequence, Type
+from typing import Any, Callable, Sequence, Type, overload
 
 import jax
 from jax._src import api_util
+from jax._src import util
 from jax.experimental.colocated_python.func import make_callable
 from jax.experimental.colocated_python.obj import wrap_class
+import numpy as np
 
 
+@overload
 def colocated_cpu_devices(
-    devices: Sequence[jax.Device],
+    devices_or_mesh: Sequence[jax.Device],
 ) -> Sequence[jax.Device]:
-  """Finds CPU devices colocated with the given devices."""
-  if not isinstance(devices, tuple):
-    devices = tuple(devices)
-  return _colocated_cpu_devices_cached(devices)
+  ...
 
 
-@jax._src.util.cache(max_size=1024, trace_context_in_key=False)
+@overload
+def colocated_cpu_devices(
+    devices_or_mesh: jax.sharding.Mesh,
+) -> jax.sharding.Mesh:
+  ...
+
+
+def colocated_cpu_devices(devices_or_mesh):
+  """Finds devices or a mesh that has CPU devices colocated with the given devices or mesh."""
+  if isinstance(devices_or_mesh, jax.sharding.Mesh):
+    return _colocated_cpu_mesh_cached(devices_or_mesh)
+
+  if not isinstance(devices_or_mesh, tuple):
+    devices_or_mesh = tuple(devices_or_mesh)
+  try:
+    return _colocated_cpu_devices_cached(devices_or_mesh)
+  except (ValueError, AttributeError):
+    return _colocated_cpu_devices_cached_fallback_to_cpu_backend(
+        devices_or_mesh
+    )
+
+
+@util.cache(max_size=1024, trace_context_in_key=False)
 def _colocated_cpu_devices_cached(
     devices: tuple[jax.Device, ...],
 ) -> Sequence[jax.Device]:
@@ -56,6 +78,36 @@ def _colocated_cpu_devices_cached(
       )
     colocated_cpu_devices.append(matches[0])
   return colocated_cpu_devices
+
+
+@util.cache(max_size=1024, trace_context_in_key=False)
+def _colocated_cpu_devices_cached_fallback_to_cpu_backend(
+    devices: tuple[jax.Device, ...],
+) -> Sequence[jax.Device]:
+  # PjRt-IFRT currently defines CPU devices by using a CPU backend.
+  # TODO(hyeontaek): Remove this fallback path once a PjRt-IFRT backend defines
+  # CPU devices by its own instead of using a separate CPU backend.
+  cpu_backend_devices = jax.local_devices(backend="cpu")
+  device_index_map = {device.id: i for i, device in enumerate(jax.devices())}
+
+  available_devices = devices[: min(len(cpu_backend_devices), len(devices))]
+  return [
+      cpu_backend_devices[device_index_map[d.id]] for d in available_devices
+  ]
+
+
+@util.cache(max_size=1024, trace_context_in_key=False)
+def _colocated_cpu_mesh_cached(mesh: jax.sharding.Mesh) -> jax.sharding.Mesh:
+  """Returns a CPU mesh that is similar to the given mesh but has colocated CPU devices."""
+  # Finding colocated CPU devices reuses the cache of `colocated_cpu_devices`
+  # called with devices. `_colocated_cpu_mesh` itself is also cached to avoid
+  # creating a new `Mesh` object repeatedly.
+  flat_cpu_devices = colocated_cpu_devices(tuple(mesh.devices.flat))
+  return jax.sharding.Mesh(
+      np.array(flat_cpu_devices).reshape(mesh.axis_sizes),
+      mesh.axis_names,
+      axis_types=mesh.axis_types,
+  )
 
 
 def colocated_python(fun: Callable[..., Any]) -> Callable[..., Any]:

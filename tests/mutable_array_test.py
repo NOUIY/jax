@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from absl.testing import absltest
 from absl.testing import parameterized
+from functools import partial
 import numpy as np
 import jax
 from jax._src import core
@@ -27,6 +28,9 @@ import jax.numpy as jnp
 from jax._src.state.types import (RefEffect)
 
 config.parse_flags_with_absl()
+
+jtu.request_cpu_devices(8)
+
 
 class MutableArrayTest(jtu.JaxTestCase):
 
@@ -48,6 +52,35 @@ class MutableArrayTest(jtu.JaxTestCase):
 
     jaxpr = jax.make_jaxpr(f)(x_mut)
     self.assertTrue(any(isinstance(e, RefEffect) for e in jaxpr.effects))
+
+  def test_basic_aot(self):
+    @jax.jit
+    def f(x_mut):
+      x_mut[...] += 1.
+      x_mut[0] += 1
+      x_mut[1] += 5
+
+    x_mut = core.mutable_array(jnp.zeros(3))
+    f.lower(x_mut).compile()(x_mut)
+    self.assertAllClose(x_mut[...], jnp.array([2., 6., 1.]),
+                        check_dtypes=False)
+
+  def test_basic_sharded_aot(self):
+    mesh = jtu.create_mesh((2,), ('x',))
+    arr = jax.device_put(np.arange(8.), NamedSharding(mesh, P('x')))
+
+    @jax.jit
+    def f(x_mut):
+      x_mut[...] += 1.
+      x_mut[0] += 1
+      x_mut[1] += 5
+
+    x_mut = core.mutable_array(arr)
+    f.lower(x_mut).compile()(x_mut)
+    expected = np.arange(8.) + 1
+    expected[0] += 1
+    expected[1] += 5
+    self.assertAllClose(x_mut[...], expected)
 
   @parameterized.parameters([True, False])
   def test_multiple_inputs_and_outputs(self, jit):
@@ -317,6 +350,53 @@ class MutableArrayTest(jtu.JaxTestCase):
     jax.grad(f)(1.0)
     self.assertAllClose(x_ref[...], 12, check_dtypes=False)
 
+  @parameterized.parameters([False, True])
+  def test_custom_vjp_grad_stats_plumbing(self, jit):
+
+   @jax.custom_vjp
+   def gradient_history_calculator(x, ref):
+     del ref
+     return x
+
+   def gradient_history_calculator_fwd(x, ref):
+     return x, ref
+
+   def gradient_history_calculator_bwd(amax_history, grad_output):
+     amax_update = jnp.max(jnp.abs(grad_output))
+     shifted = jnp.roll(amax_history[:], 1)
+     shifted = shifted.at[0].set(amax_update)
+     amax_history[:] = shifted
+     amax_from_history = jnp.max(amax_history[:])
+     grad_output = grad_output / amax_from_history
+     return grad_output, None
+
+   gradient_history_calculator.defvjp(
+     gradient_history_calculator_fwd,
+     gradient_history_calculator_bwd)
+
+   class DotOp:
+     def __init__(self):
+       self.amax_history = core.mutable_array(jnp.zeros(5,))
+
+     def forward(self, x, y):
+       out = jnp.dot(x, y)
+       out = gradient_history_calculator(out, self.amax_history)
+       return out
+
+   dot_op = DotOp()
+   x_top = jnp.ones((5,))
+   y_top = jnp.ones((5,))
+
+   def loss(x, y):
+     return dot_op.forward(x, y).sum()
+
+   if jit:
+     loss = jax.jit(loss)
+
+   for i in range(3):
+     jax.grad(loss, (0,1))(x_top, y_top)
+     self.assertAllClose(dot_op.amax_history[:], jnp.zeros((5,)).at[:i+1].set(1.0), check_dtypes=False)
+
 
 @jtu.with_config(jax_mutable_array_checks=True)
 class MutableArrayErrorsTest(jtu.JaxTestCase):
@@ -410,6 +490,19 @@ class MutableArrayErrorsTest(jtu.JaxTestCase):
       f(x_ref)
 
   @parameterized.parameters([False, True])
+  def test_return_from_custom_vjp_primal_nondiff_argnum(self, jit):
+    @partial(jax.custom_vjp, nondiff_argnums=(0,))
+    def f(_, ref):
+      return ref
+    f.defvjp(lambda _, ref: ..., lambda *_: ...)
+    if jit:
+      f = jax.jit(f, static_argnums=0)
+    x_ref = core.mutable_array(0.)
+    with self.assertRaisesRegex(
+        ValueError, "custom_vjp primal function"):
+      f('hi', x_ref)
+
+  @parameterized.parameters([False, True])
   def test_return_from_custom_vjp_fwd(self, jit):
     @jax.custom_vjp
     def f(x, ref):
@@ -418,9 +511,23 @@ class MutableArrayErrorsTest(jtu.JaxTestCase):
     if jit:
       f = jax.jit(f)
     x_ref = core.mutable_array(0.)
+
+    jax.vjp(f, 3., x_ref)  # returning input ref, okay
+
+    @jax.custom_vjp
+    def g(x, ref):
+      return x
+    def g_fwd(x, _):
+      y_ref = core.mutable_array(0)
+      return x, y_ref
+    g.defvjp(g_fwd, lambda ref, g: g)
+    if jit:
+      g = jax.jit(g)
+    x_ref = core.mutable_array(0.)
+
     with self.assertRaisesRegex(
         ValueError, "custom_vjp fwd function"):
-      jax.vjp(f, 3., x_ref)
+      jax.vjp(g, 3., x_ref)
 
   @parameterized.parameters([False, True])
   def test_argument_aliases_custom_vjp_primal(self, jit):

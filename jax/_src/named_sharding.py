@@ -22,6 +22,7 @@ from typing import Any, Union
 
 from jax._src import config
 from jax._src.util import use_cpp_class, cache, use_cpp_method
+from jax._src.lib import jaxlib_extension_version
 from jax._src.lib import xla_client as xc
 from jax._src.lib.mlir.dialects import sdy
 from jax._src import mesh as mesh_lib
@@ -72,6 +73,11 @@ mesh devices ndarray would have to be transposed before flattening and assignmen
 """
 ArrayMapping = collections.OrderedDict[MeshAxisName, int]
 ArrayMappingOrAutoOrUnspecified = Union[ArrayMapping, AUTO, UnspecifiedValue]
+
+
+def _unpickle_named_sharding(mesh, spec, memory_kind, logical_device_ids):
+  return NamedSharding(mesh, spec, memory_kind=memory_kind,
+                       _logical_device_ids=logical_device_ids)
 
 
 @use_cpp_class(xc.NamedSharding)
@@ -133,20 +139,21 @@ class NamedSharding(JSharding.Sharding):
     return f'NamedSharding(mesh={mesh_repr}, spec={self.spec}{mem}{ldi})'
 
   def __reduce__(self):
-    return (type(self), (self.mesh, self.spec),
-            {'memory_kind': self.memory_kind,
-             '_logical_device_ids': self._logical_device_ids})
+    return (_unpickle_named_sharding,
+            (self.mesh, self.spec, self.memory_kind, self._logical_device_ids))
 
   @property
   def memory_kind(self) -> str | None:
     return self._memory_kind
 
+  @use_cpp_method(jaxlib_extension_version >= 353)
   def __hash__(self):
     if not hasattr(self, '_hash'):
       self._hash = hash(
           (self.mesh, self.memory_kind, self.spec, self._logical_device_ids))
     return self._hash
 
+  @use_cpp_method(jaxlib_extension_version >= 353)
   def __eq__(self, other):
     if not isinstance(other, NamedSharding):
       return False
@@ -223,12 +230,18 @@ class NamedSharding(JSharding.Sharding):
     return num_partitions == 1
 
   def with_memory_kind(self, kind: str) -> NamedSharding:
-    return NamedSharding(self.mesh, self.spec, memory_kind=kind)
+    return self.update(memory_kind=kind)
 
-  def with_spec(self, spec: PartitionSpec | Sequence[Any]) -> NamedSharding:
+  def update(self, **kwargs) -> NamedSharding:
+    spec = kwargs.pop("spec", self.spec)
     if not isinstance(spec, PartitionSpec):
       spec = PartitionSpec(*spec)
-    return NamedSharding(self.mesh, spec, memory_kind=self.memory_kind)
+    return NamedSharding(
+        mesh=kwargs.pop("mesh", self.mesh),
+        spec=spec,
+        memory_kind=kwargs.pop("memory_kind", self.memory_kind),
+        _logical_device_ids=kwargs.pop("_logical_device_ids",
+                                       self._logical_device_ids))
 
   def _to_xla_hlo_sharding(self, num_dimensions: int) -> xc.HloSharding:
     return named_sharding_to_xla_hlo_sharding(self, num_dimensions)
@@ -512,4 +525,15 @@ def _check_mesh_unreduced(mesh, pspec):
       raise ValueError(
           'Unreduced axes can only refer to mesh axes that is of type'
           f' `Explicit`. Got unreduced axes: {pspec.unreduced} and'
+          f' mesh: {mesh}')
+
+  for u in pspec.reduced:
+    if u not in mesh.axis_names:
+      raise ValueError(
+          f'Reduced axes {u} is not found in {mesh.axis_names=}. '
+          f'Got {pspec=}')
+    if mesh._name_to_type[u] in (AxisType.Auto, AxisType.Manual):
+      raise ValueError(
+          'Reduced axes can only refer to mesh axes that is of type'
+          f' `Explicit`. Got reduced axes: {pspec.reduced} and'
           f' mesh: {mesh}')
