@@ -16,14 +16,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import dataclasses
 import functools
-import math
-from collections.abc import Callable
-from typing import Iterable, Protocol, Sequence, TypeVar
-
 import itertools
+import math
+from typing import Generator, Iterable, Protocol, Sequence, TypeVar
+
 import jax
+import jax.experimental.mosaic.gpu as mgpu
 from jaxlib.mlir import ir
 from jaxlib.mlir.dialects import arith
 from jaxlib.mlir.dialects import gpu
@@ -33,7 +34,6 @@ from jaxlib.mlir.dialects import memref
 from jaxlib.mlir.dialects import vector
 import numpy as np
 
-import jax.experimental.mosaic.gpu as mgpu
 from . import utils
 
 # mypy: ignore-errors
@@ -461,6 +461,12 @@ class TiledLayout:
         new_vector_dim,
     )
 
+  def reduce(self, axes: Sequence[int]) -> TiledLayout:
+    reduced_layout = self
+    for a in sorted(axes, reverse=True):
+      reduced_layout = reduced_layout.remove_dimension(a)
+    return reduced_layout
+
 
 def _tiled_wgmma_layout(shape: tuple[int, ...]):
   """Returns the tiled layout relevant for WGMMA operations.
@@ -677,6 +683,30 @@ WGMMA_TRANSPOSED_LAYOUT = TiledLayout(
     warp_dim=-10,
     lane_dims=(-6, -3, -5),
     vector_dim=-2,
+)
+
+# Like WGMMA_LAYOUT, only each warp holds a 32xN strip instead of 16xN.
+TCGEN05_LAYOUT = TiledLayout(
+    Tiling(((128, 8), (32, 8), (8, 8), (1, 2))),
+    warp_dim=-8,
+    lane_dims=(-4, -3),
+    vector_dim=-1,
+)
+# TCGEN05_ROW_LAYOUT is to TCGEN05_LAYOUT as WGMMA_ROW_LAYOUT is to
+# WGMMA_LAYOUT.
+TCGEN05_ROW_LAYOUT = TiledLayout(
+    Tiling(tiles=((128,), (32,), (8,), (1,), (1,))),
+    warp_dim=-5,
+    lane_dims=(-3, Replicated(times=4)),
+    vector_dim=-1,
+)
+# TCGEN05_COL_LAYOUT is to TCGEN05_LAYOUT as WGMMA_COL_LAYOUT is to
+# WGMMA_LAYOUT.
+TCGEN05_COL_LAYOUT = TiledLayout(
+    Tiling(tiles=((8,), (8,), (8,), (2,))),
+    warp_dim=Replicated(times=4),
+    lane_dims=(Replicated(times=8), -2),
+    vector_dim=-1,
 )
 
 @jax.tree_util.register_pytree_node_class
@@ -1427,6 +1457,98 @@ class FragmentedArray:
           "Register bitwidth in target type must be divisible by 8, got"
           f" {new_reg_bitwidth}"
       )
+    if cur_dtype == i4 and new_dtype == f8e4m3fn:
+      # The algorithm here is taken from CUTLASS's `NumericArrayConverter`
+      # specialization for int4 -> f8e4m3, available at
+      # https://github.com/NVIDIA/cutlass/blob/5c6bca04414e06ce74458ab0a2018e2b8272701c/include/cutlass/numeric_conversion.h#L4982.
+      # Each call to the function below will upcast 4 contiguous nibbles of
+      # the input 32-bit register, and whether to select the 4 low nibbles or
+      # the 4 high nibbles is determined by the `part` argument.
+      def upcast_to_f8e4m3fn(reg: ir.Value, part: int):
+        lut = [
+            0x44403800,  # [0, 1, 2, 3] encoded as f8e4m3fn
+            0x4E4C4A48,  # [4, 5, 6, 7] encoded as f8e4m3fn
+            0xCACCCED0,  # [-8, -7, -6, -5] encoded as f8e4m3fn
+            0xB8C0C4C8,  # [-4, -3, -2, -1] encoded as f8e4m3fn
+        ]
+
+        sign = arith.shrui(arith.andi(reg, c(0x88888888, i32)), c(1, i32))
+        # Ignore the sign when indexing into the LUT.
+        lut_idx = arith.andi(reg, c(0x77777777, i32))
+
+        assert 0 <= part < 2
+        if part == 1:
+          lut_idx = arith.shrui(lut_idx, c(16, i32))
+          sign = arith.shrui(sign, c(16, i32))
+
+        prmt_sign_pattern = arith.ori(sign, c(0x32103210, i32))
+        return llvm.inline_asm(
+            i32,
+            [lut_idx, prmt_sign_pattern],
+            f"""
+            {{
+            .reg .b32 pos_f8s, neg_f8s;
+            prmt.b32 pos_f8s, {lut[0]}, {lut[1]}, $1;
+            prmt.b32 neg_f8s, {lut[2]}, {lut[3]}, $1;
+            prmt.b32 $0, pos_f8s, neg_f8s, $2;
+            }}
+            """,
+            "=r,r,r",
+        )
+      new_registers = np.empty_like(self.registers)
+
+      def packed_registers() -> Generator[tuple[list[index], ir.Value]]:
+        """Tries to pack registers into groups of 16 bits if vector_len < 4."""
+        generator = np.ndenumerate(self.registers)
+        indices = []
+        regs = []
+        while True:
+          try:
+            for _ in range(max(4 // vector_len, 1)):
+              idx, reg = next(generator)
+              indices.append(idx)
+              regs.append(reg)
+            yield indices, utils.vector_concat(regs)
+            regs.clear()
+            indices.clear()
+          except StopIteration:
+            break
+        if regs:
+          yield indices, utils.vector_concat(regs)
+
+      for indices, reg in packed_registers():
+        group_size = ir.VectorType(reg.type).shape[0]
+        assert group_size % vector_len == 0
+        int_ty = ir.IntegerType.get_signless(group_size * 4)
+        reg_as_i32 = utils.bitcast(reg, int_ty)
+        if int_ty != i32:
+          reg_as_i32 = arith.extsi(i32, reg_as_i32)
+        out_i32_regs = [
+            upcast_to_f8e4m3fn(reg_as_i32, part=part)
+            for part in range(max(group_size // 4, 1))
+        ]
+        out_vec_int = utils.vector_concat([
+            vector.splat(ir.VectorType.get((1,), i32), out_i32_reg)
+            for out_i32_reg in out_i32_regs
+        ])
+        out_vector_len = len(out_i32_regs) * 4
+        # Bitcast to i8 first to allow slicing as necessary, since LLVM chokes
+        # on f8 types.
+        out_vec = utils.bitcast(
+            out_vec_int, ir.VectorType.get((out_vector_len,), i8)
+        )
+        offset = 0
+        for idx in indices:
+          sliced_out_vec = utils.vector_slice(
+              out_vec, slice(offset, offset + vector_len)
+          )
+          new_registers[idx] = utils.bitcast(
+              sliced_out_vec, ir.VectorType.get((vector_len,), f8e4m3fn)
+          )
+          offset += vector_len
+      return FragmentedArray(
+          _registers=new_registers, _layout=self.layout, _is_signed=None
+      )
     if cur_dtype == i4 and self.is_signed and new_dtype == bf16:
       new_registers = np.empty_like(self.registers)
       out_vec_ty = ir.VectorType.get((vector_len,), new_dtype)
@@ -1544,30 +1666,27 @@ class FragmentedArray:
           _registers=new_registers, _layout=self.layout, _is_signed=is_signed
       )
     # TODO(bchetioui): handle conversions to/from other float8 types.
-    if cur_dtype == f32 and new_dtype == f8e4m3fn:
+    if cur_dtype in {bf16, f32} and new_dtype == f8e4m3fn:
       if vector_len != 2:
         raise NotImplementedError(vector_len)
       new_registers = np.empty_like(self.registers)
-      empty_vec_32 = llvm.mlir_undef(ir.VectorType.get((1,), i32))
-      empty_result_vec = llvm.mlir_undef(ir.VectorType.get((2,), i8))
+      empty_vec_16 = llvm.mlir_undef(ir.VectorType.get((1,), i16))
       for idx, reg in np.ndenumerate(self.registers):
         e0 = vector.extractelement(reg, position=c(0, index))
         e1 = vector.extractelement(reg, position=c(1, index))
-        new_reg_32 = llvm.inline_asm(
-            i32,
+        # TODO(bchetioui): can we do faster than this?
+        if cur_dtype == bf16:
+          e0 = arith.extf(f32, e0)
+          e1 = arith.extf(f32, e1)
+        new_reg_16 = llvm.inline_asm(
+            i16,
             [e1, e0],
             "cvt.rn.satfinite.e4m3x2.f32 $0, $1, $2;",
             "=h,f,f",
         )
-        new_vec_32 = llvm.insertelement(empty_vec_32, new_reg_32, c(0, i32))
-        new_vec_f8 = vector.bitcast(ir.VectorType.get((4,), i8), new_vec_32)
-        res = llvm.insertelement(
-            empty_result_vec,
-            vector.extractelement(new_vec_f8, position=c(0, i32)), c(0, i32))
-        res = llvm.insertelement(
-            res,
-            vector.extractelement(new_vec_f8, position=c(1, i32)), c(1, i32))
-        new_registers[idx] = vector.bitcast(ir.VectorType.get((2,), f8e4m3fn), res)
+        new_registers[idx] = vector.bitcast(
+            ir.VectorType.get((2,), f8e4m3fn),
+            llvm.insertelement(empty_vec_16, new_reg_16, c(0, i32)))
       return FragmentedArray(
           _registers=new_registers, _layout=self.layout, _is_signed=is_signed
       )
@@ -1825,9 +1944,7 @@ class FragmentedArray:
       out_reg = vector.extractelement(out_reg, position=c(0, index))
       out_regs = np.asarray(out_reg, dtype=object)
     else:
-      reduced_layout = layout
-      for a in sorted(axis, reverse=True):
-        reduced_layout = reduced_layout.remove_dimension(a)
+      reduced_layout = layout.reduce(axis)
       out_regs = out_regs.reshape(reduced_layout.registers_shape(reduced_logical_shape))
     return FragmentedArray(
         _registers=out_regs, _layout=reduced_layout, _is_signed=self.is_signed
@@ -1866,11 +1983,15 @@ class FragmentedArray:
     )
 
   def broadcast_minor(self, n):
-    if self.layout != WGMMA_ROW_LAYOUT:
-      raise NotImplementedError
+    if self.layout == WGMMA_ROW_LAYOUT:
+      output_layout = WGMMA_LAYOUT
+    elif self.layout == TCGEN05_ROW_LAYOUT:
+      output_layout = TCGEN05_LAYOUT
+    else:
+      raise NotImplementedError(self.layout)
     if n % 8:
       raise ValueError("Number of columns must be divisible by 8")
-    reg_shape = WGMMA_LAYOUT.registers_shape((self.shape[0], n))
+    reg_shape = output_layout.registers_shape((self.shape[0], n))
     new_regs = np.empty(reg_shape, dtype=object)
     dtype = self.mlir_dtype
     i0 = arith.constant(ir.IndexType.get(), 0)
@@ -1879,26 +2000,30 @@ class FragmentedArray:
       tile[0] = row_tile
       tile[4] = row_subtile
       new_regs[tuple(tile)] = vector.splat(
-          ir.VectorType.get((WGMMA_LAYOUT.vector_length,), dtype),
+          ir.VectorType.get((output_layout.vector_length,), dtype),
           vector.extractelement(reg, position=i0),
       )
     return FragmentedArray(
-        _registers=new_regs, _layout=WGMMA_LAYOUT, _is_signed=self.is_signed
+        _registers=new_regs, _layout=output_layout, _is_signed=self.is_signed
     )
 
   def broadcast_major(self, m):
-    if self.layout != WGMMA_COL_LAYOUT:
-      raise NotImplementedError
+    if self.layout == WGMMA_COL_LAYOUT:
+      output_layout = WGMMA_LAYOUT
+    elif self.layout == TCGEN05_COL_LAYOUT:
+      output_layout = TCGEN05_LAYOUT
+    else:
+      raise NotImplementedError(self.layout)
     if m % 64:
       raise ValueError("Number of rows must be divisible by 64")
-    reg_shape = WGMMA_LAYOUT.registers_shape((m, self.shape[0]))
+    reg_shape = output_layout.registers_shape((m, self.shape[0]))
     new_regs = np.empty(reg_shape, dtype=object)
     for (col_tile, *_), reg in np.ndenumerate(self.registers):
       tile = [slice(None)] * len(new_regs.shape)
       tile[1] = col_tile
       new_regs[tuple(tile)] = reg
     return FragmentedArray(
-        _registers=new_regs, _layout=WGMMA_LAYOUT, _is_signed=self.is_signed
+        _registers=new_regs, _layout=output_layout, _is_signed=self.is_signed
     )
 
   def select(self, on_true, on_false):
@@ -2099,7 +2224,9 @@ class FragmentedArray:
         reg_ty = ir.VectorType.get((layout.vector_length,), dtype)
         # f8 data types are not handled by the LLVM dialect, so we need to
         # transfer them as i8 and bitcast them back to f8.
-        transfer_ty = ir.VectorType.get((layout.vector_length,), i8 if is_f8 else dtype)
+        transfer_ty = ir.VectorType.get(
+            (layout.vector_length,), i8 if is_f8 else dtype
+        )
         loads = cls.transfer_tiled2(ref, swizzle, layout, shape, optimized)
         for _, update, ptr in loads:
           loaded_reg = llvm.load(transfer_ty, ptr)
@@ -2496,7 +2623,7 @@ def plan_tiled_transfer(
     raise ValueError(
         "Failed to prove that vector transfers don't cross swizzle tile"
         " boundaries. This check is incomplete, and does not guarantee that"
-        " this is a user error, but it might be." + str(transfer_alignment)
+        f" this is a user error, but it might be. {transfer_alignment=}"
     )
 
   # 2. The transfer pattern does not cause bank conflicts.

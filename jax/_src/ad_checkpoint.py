@@ -621,7 +621,7 @@ def _insert_reduce_precision(jaxpr: core.Jaxpr, num_res: int) -> core.Jaxpr:
     if v not in used_vars:
       continue
     assert isinstance(v, core.Var)
-    newvar = core.Var(v.suffix, v.aval)
+    newvar = core.Var(v.aval)
     finfo = dtypes.finfo(v.aval.dtype)
     params = dict(exponent_bits=finfo.nexp, mantissa_bits=finfo.nmant)
     if v in constvars or v in invars:
@@ -879,6 +879,3 @@ def checkpoint_wrapper(
     raise NotImplementedError(msg)
   return checkpoint(fun, prevent_cse=prevent_cse, policy=policy,
                     static_argnums=static_argnums)
-
-# TODO(phawkins): update users to refer to the public name.
-_optimization_barrier = lax_internal.optimization_barrier

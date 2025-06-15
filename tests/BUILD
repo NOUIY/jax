@@ -272,7 +272,10 @@ jax_multiplatform_test(
         "gpu_h100x2",
     ],
     # TODO(dfm): Remove after removal of jex.ffi imports.
-    deps = ["//jax:extend"] + py_deps([
+    deps = [
+        "//jax:extend",
+        "//jax:ffi",
+    ] + py_deps([
         "absl/testing",
         "numpy",
     ]),
@@ -928,6 +931,10 @@ jax_multiplatform_test(
             "nodebug",  # Times out.
             "notsan",  # Times out.
         ],
+    },
+    env = {
+        # TODO(b/424430576): something is going wrong with AVX512 code generation.
+        "XLA_FLAGS": "--xla_cpu_max_isa=AVX2",
     },
     shard_count = {
         "cpu": 40,
@@ -1605,6 +1612,7 @@ jax_multiplatform_test(
     deps = [
         "//jax:cache_key",
         "//jax:compiler",
+        "//jax:custom_partitioning",
     ] + py_deps("absl/testing"),
 )
 

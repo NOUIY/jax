@@ -53,6 +53,7 @@ pytype_strict_library(
     data = [":ffi_headers"],
     deps = [
         ":_jax",
+        ":_pretty_printer",
         ":cpu_feature_guard",
         ":jax",
         ":jaxlib_files",
@@ -150,6 +151,7 @@ pywrap_library(
     },
     deps = [
         ":_jax",
+        ":_pretty_printer",
         ":utils",
         ":weakref_lru_cache",
         "//jaxlib/mlir/_mlir_libs:_chlo",
@@ -245,6 +247,19 @@ nanobind_extension(
     module_name = "cpu_feature_guard",
     deps = [
         "@xla//third_party/python_runtime:headers",
+    ],
+)
+
+nanobind_pywrap_extension(
+    name = "_pretty_printer",
+    srcs = ["_pretty_printer.cc"],
+    deps = [
+        ":nb_class_ptr",
+        "@com_google_absl//absl/container:inlined_vector",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/types:span",
+        "@nanobind",
     ],
 )
 
@@ -351,6 +366,7 @@ nanobind_pywrap_extension(
         "@xla//xla/pjrt:pjrt_layout",
         "@xla//xla/pjrt:status_casters",
         "@xla//xla/pjrt/c:pjrt_c_api_hdrs",
+        "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",
         "@xla//xla/pjrt/distributed",
         "@xla//xla/pjrt/distributed:client",
         "@xla//xla/pjrt/distributed:key_value_store_interface",
@@ -813,8 +829,23 @@ cc_library(
 )
 
 cc_library(
+    name = "cached_py_object",
+    hdrs = ["cached_py_object.h"],
+    copts = [
+        "-fexceptions",
+        "-fno-strict-aliasing",
+    ],
+    features = ["-use_header_modules"],
+    deps = [
+        "@com_google_absl//absl/functional:function_ref",
+        "@nanobind",
+    ],
+)
+
+cc_library(
     name = "py_client",
     srcs = [
+        "partition_spec.cc",
         "py_array.cc",
         "py_client.cc",
         "py_compile_only_client.cc",
@@ -828,6 +859,7 @@ cc_library(
         "to_ifrt_sharding.cc",
     ],
     hdrs = [
+        "partition_spec.h",
         "py_array.h",
         "py_client.h",
         "py_compile_only_client.h",
@@ -849,6 +881,7 @@ cc_library(
     features = ["-use_header_modules"],
     visibility = jax_visibility("jaxlib/py_client"),
     deps = [
+        ":cached_py_object",
         ":guard_lib",
         ":nb_class_ptr",
         ":py_client_cpu",
@@ -870,14 +903,12 @@ cc_library(
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:cord",
         "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/types:span",
         "@llvm-project//llvm:Support",
-        "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Pass",
         "@nanobind",
-        "@shardy//shardy/dialect/sdy/ir:dialect",
-        "@stablehlo//:stablehlo_ops",
         "@tsl//tsl/platform:fingerprint",
         "@tsl//tsl/platform:ml_dtypes",
         "@tsl//tsl/profiler/lib:traceme",
@@ -917,7 +948,6 @@ cc_library(
         "@xla//xla/python/pjrt_ifrt:pjrt_dtype",
         "@xla//xla/python/pjrt_ifrt:xla_ifrt",
         "@xla//xla/service:platform_util",
-        "@xla//xla/service/spmd/shardy:constants",
         "@xla//xla/tsl/concurrency:ref_count",
         "@xla//xla/tsl/framework:allocator",
         "@xla//xla/tsl/platform:env",
@@ -1166,6 +1196,7 @@ cc_library(
         "@tsl//tsl/platform",
         "@xla//third_party/python_runtime:headers",  # buildcleaner: keep
         "@xla//xla/pjrt:exceptions",
+        "@xla//xla/python:nb_helpers",
         "@xla//xla/tsl/platform:logging",
     ],
 )

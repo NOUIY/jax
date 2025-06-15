@@ -55,14 +55,19 @@ from . import utils
 
 # MLIR can't find libdevice unless we point it to the CUDA path
 # TODO(apaszke): Unify with jax._src.lib.cuda_path
-CUDA_ROOT = "/usr/local/cuda"
+cuda_root = "/usr/local/cuda"
+PYTHON_RUNFILES = os.environ.get("PYTHON_RUNFILES")
 if os.environ.get("CUDA_ROOT") is None:
-  os.environ["CUDA_ROOT"] = CUDA_ROOT
+  if PYTHON_RUNFILES:
+    cuda_nvcc_root = os.path.join(PYTHON_RUNFILES, "cuda_nvcc")
+    if os.path.exists(cuda_nvcc_root):
+      cuda_root = cuda_nvcc_root
+  os.environ["CUDA_ROOT"] = cuda_root
 else:
-  CUDA_ROOT = os.environ["CUDA_ROOT"]
+  cuda_root = os.environ["CUDA_ROOT"]
 
-PTXAS_PATH = os.path.join(CUDA_ROOT, "bin/ptxas")
-NVDISASM_PATH = os.path.join(CUDA_ROOT, "bin/nvdisasm")
+PTXAS_PATH = os.path.join(cuda_root, "bin/ptxas")
+NVDISASM_PATH = os.path.join(cuda_root, "bin/nvdisasm")
 
 # This tracks the latest Mosaic GPU IR version with a monthly delay.
 FWD_COMPAT_IR_VERSION = 1
@@ -89,7 +94,21 @@ if RUNTIME_PATH and RUNTIME_PATH.exists():
 try:
   from nvidia import nvshmem
 except ImportError:
-  pass
+  # Try to find the nvshmem library in Bazel runfiles.
+  if PYTHON_RUNFILES:
+    libdevice_path = os.path.join(
+        PYTHON_RUNFILES, "nvidia_nvshmem", "lib", "libnvshmem_device.bc"
+    )
+    if os.path.exists(libdevice_path):
+      os.environ["MOSAIC_GPU_NVSHMEM_BC_PATH"] = libdevice_path
+    for root, _, files in os.walk(os.path.join(os.getcwd(), "_solib_local")):
+      if "libnvshmem_host.so.3" in files:
+        os.environ["MOSAIC_GPU_NVSHMEM_SO_PATH"] = os.path.join(
+            root, "libnvshmem_host.so.3"
+        )
+        break
+  else:
+    pass
 else:
   if os.environ.get("MOSAIC_GPU_NVSHMEM_BC_PATH") is None:
     os.environ["MOSAIC_GPU_NVSHMEM_BC_PATH"] = os.path.join(
@@ -338,8 +357,8 @@ def _construct_smem_reftree(
     dynamic_smem_offset: int = 0,
 ) -> Callable[[], RefTree]:
   index = ir.IndexType.get()
-  i8 = ir.IntegerType.get_signless(8)
   i32 = ir.IntegerType.get_signless(32)
+  i64 = ir.IntegerType.get_signless(64)
   smem = ir.Attribute.parse("#gpu.address_space<workgroup>")
   flat_ref_tys, smem_buffer_tree = jax.tree.flatten(
       smem_buffers, is_leaf=lambda x: isinstance(x, Union)
@@ -347,21 +366,23 @@ def _construct_smem_reftree(
   smem_refs = []
 
   for ref_ty in flat_ref_tys:
-    def get_barrier_ptr(num_barriers: int) -> ir.Value:
+    def barrier_memref(num_barriers: int) -> ir.Value:
       nonlocal dynamic_smem_offset
-      workgroup_nvptx_address_space = (
-          utils.gpu_address_space_to_nvptx(gpu.AddressSpace.Workgroup)
+      barrier_ty = ir.MemRefType.get(
+          (num_barriers,),
+          ir.Type.parse("!mosaic_gpu.barrier")
+          if lowering_semantics == LoweringSemantics.Warpgroup
+          else i64,
+          memory_space=smem,
       )
-      smem_base_ptr = utils.memref_ptr(
-          dynamic_smem, memory_space=workgroup_nvptx_address_space
-      )
-      smem_ptr_ty = ir.Type.parse(f"!llvm.ptr<{workgroup_nvptx_address_space}>")
-      barrier_base_ptr = llvm.getelementptr(
-          smem_ptr_ty, smem_base_ptr, [], [dynamic_smem_offset], i8,
-          llvm.GEPNoWrapFlags.none
-      )
+      barrier_memref = _slice_smem(
+            barrier_ty,
+            dynamic_smem,
+            c(dynamic_smem_offset, index),
+            lowering_semantics,
+        )
       dynamic_smem_offset += num_barriers * utils.MBARRIER_BYTES
-      return barrier_base_ptr
+      return barrier_memref
     match ref_ty:
       case Union(members):
         member_thunks = [
@@ -385,22 +406,15 @@ def _construct_smem_reftree(
         init_fn = utils.DialectBarrierRef.initialize if (
             lowering_semantics == LoweringSemantics.Warpgroup
         ) else utils.BarrierRef.initialize
-        ref = init_fn(
-            get_barrier_ptr(num_barriers), num_barriers, arrival_count=1
-        )
+        ref = init_fn(barrier_memref(num_barriers), arrival_count=1)
       case Barrier(arrival_count, num_barriers):
         init_fn = utils.DialectBarrierRef.initialize if (
             lowering_semantics == LoweringSemantics.Warpgroup
         ) else utils.BarrierRef.initialize
-        ref = init_fn(
-            get_barrier_ptr(num_barriers),
-            num_barriers,
-            arrival_count=arrival_count,
-        )
+        ref = init_fn(barrier_memref(num_barriers), arrival_count=arrival_count)
       case ClusterBarrier(collective_dims, num_barriers):
         ref = utils.CollectiveBarrierRef.initialize(
-            get_barrier_ptr(num_barriers),
-            num_barriers,
+            barrier_memref(num_barriers),
             collective_dims,
             cluster_shape,
         )
@@ -726,6 +740,10 @@ def as_gpu_kernel(
   elif not isinstance(inout_shape, tuple):
     inout_shape = (inout_shape,)
 
+  inout_shape = jax.tree.map(lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype),
+                             inout_shape)
+  out_shape = jax.tree.map(lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype),
+                           out_shape)
   module, out_shape, unwrap_output_tuple, launch_ctx = (
       _lower_as_gpu_kernel(
           body, grid, cluster, block, in_shape, out_shape, inout_shape,

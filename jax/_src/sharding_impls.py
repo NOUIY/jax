@@ -99,6 +99,10 @@ class SdyArrayList:
 replicated_hlo_sharding = xc.HloSharding.replicate()
 
 
+def _unpickle_single_device_sharding(device, memory_kind):
+  return SingleDeviceSharding(device, memory_kind=memory_kind)
+
+
 @use_cpp_class(xc.SingleDeviceSharding)
 class SingleDeviceSharding(jsharding.Sharding):
   """A :class:`Sharding` that places its data on a single device.
@@ -121,7 +125,7 @@ class SingleDeviceSharding(jsharding.Sharding):
     self._memory_kind = memory_kind
 
   def __reduce__(self):
-    return type(self), (self._device,), {'memory_kind': self._memory_kind}
+    return (_unpickle_single_device_sharding, (self._device, self._memory_kind))
 
   def __repr__(self):
     mem = '' if self._memory_kind is None else f', memory_kind={self._memory_kind}'
@@ -205,8 +209,7 @@ class PmapSharding(jsharding.Sharding):
     self.sharding_spec = sharding_spec
 
   def __reduce__(self):
-    return (type(self), (self.devices, self.sharding_spec),
-            {'memory_kind': self.memory_kind})
+    return (type(self), (self.devices, self.sharding_spec))
 
   def __eq__(self, other):
     if not isinstance(other, PmapSharding):
@@ -558,6 +561,9 @@ class DeviceIdSet:
             self._ids == other._ids)
 
 
+def _unpickle_gspmd_sharding(devices, op_sharding, memory_kind):
+  return GSPMDSharding(devices, op_sharding, memory_kind=memory_kind)
+
 @use_cpp_class(xc.GSPMDSharding)
 class GSPMDSharding(jsharding.Sharding):
   _devices: tuple[Device, ...]
@@ -579,8 +585,8 @@ class GSPMDSharding(jsharding.Sharding):
     self._memory_kind = memory_kind
 
   def __reduce__(self):
-    return (type(self), (self._devices, self._hlo_sharding.to_proto()),
-            {'memory_kind': self._memory_kind})
+    return (_unpickle_gspmd_sharding,
+            (self._devices, self._hlo_sharding.to_proto(), self._memory_kind))
 
   @functools.cached_property
   def _hlo_sharding_hash(self):
@@ -1179,7 +1185,7 @@ def make_key_array_phys_sharding(aval, sharding):
   elif isinstance(sharding, NamedSharding):
     elt_aval = core.physical_element_aval(aval.dtype)
     trailing_spec = [None] * elt_aval.ndim
-    return sharding.with_spec(PartitionSpec(*sharding.spec, *trailing_spec))
+    return sharding.update(spec=PartitionSpec(*sharding.spec, *trailing_spec))
   else:
     hlos = sharding._to_xla_hlo_sharding(aval.ndim)
     return GSPMDSharding(
@@ -1242,7 +1248,7 @@ def logical_sharding(logical_shape, dtype, phys_sharding) -> jsharding.Sharding:
                    *[None] * (len(phys_shape) - len(phys_sharding.spec)))
     else:
       phys_spec = phys_sharding.spec  # type: ignore
-    return phys_sharding.with_spec(phys_spec[:-elt_aval.ndim])
+    return phys_sharding.update(spec=phys_spec[:-elt_aval.ndim])
   else:
     return get_logical_gspmd_sharding(logical_shape, dtype, phys_sharding)
 

@@ -28,12 +28,11 @@ from typing import Any, Protocol, TypeVar, Union, cast
 import logging
 import numpy as np
 
-import jax
-from jax import sharding
-
 from jax._src import ad_util
+from jax._src import api
 from jax._src import config
 from jax._src import core
+from jax._src import custom_derivatives
 from jax._src import dispatch
 from jax._src import dtypes
 from jax._src import effects
@@ -45,11 +44,14 @@ from jax._src.lib import _jax
 from jax._src.lib.mlir import ir, passmanager
 from jax._src.lib.mlir.dialects import hlo
 from jax._src.lib.mlir.dialects import func as func_dialect
+from jax._src import mesh
 from jax._src import pjit
+from jax._src import sharding
 from jax._src import sharding_impls
 from jax._src import source_info_util
 from jax._src import stages
 from jax._src import tree_util
+from jax._src import typing
 from jax._src import util
 from jax._src import xla_bridge as xb
 
@@ -215,7 +217,7 @@ class Exported:
 
   def in_shardings_jax(
     self,
-    mesh: sharding.Mesh) -> Sequence[sharding.Sharding | None]:
+    mesh: mesh.Mesh) -> Sequence[sharding.Sharding | None]:
     """Creates Shardings corresponding to self.in_shardings_hlo.
 
     The Exported object stores `in_shardings_hlo` as HloShardings, which are
@@ -225,7 +227,7 @@ class Exported:
 
     Example usage:
 
-      >>> from jax import export
+      >>> from jax import export, sharding
       >>> # Prepare the exported object:
       >>> exp_mesh = sharding.Mesh(jax.devices(), ("a",))
       >>> exp = export.export(jax.jit(lambda x: jax.numpy.add(x, x),
@@ -255,7 +257,7 @@ class Exported:
 
   def out_shardings_jax(
       self,
-      mesh: sharding.Mesh) -> Sequence[sharding.Sharding | None]:
+      mesh: mesh.Mesh) -> Sequence[sharding.Sharding | None]:
     """Creates Shardings corresponding to `self.out_shardings_hlo`.
 
     See documentation for in_shardings_jax.
@@ -512,13 +514,13 @@ def default_export_platform() -> str:
   One of: `tpu`, `cpu`, `cuda`, `rocm`.
   """
   # Canonicalize to turn 'gpu' into 'cuda' or 'rocm'
-  return xb.canonicalize_platform(jax.default_backend())
+  return xb.canonicalize_platform(xb.default_backend())
 
 default_lowering_platform = default_export_platform
 
 def shape_and_dtype_jax_array(a) -> tuple[Sequence[int | None], DType]:
   """Returns the shape and dtype of a jax.Array or a j"""
-  if isinstance(a, jax.ShapeDtypeStruct):
+  if isinstance(a, api.ShapeDtypeStruct):
     return a.shape, a.dtype
   aval = core.get_aval(a)
   return aval.shape, aval.dtype
@@ -747,14 +749,14 @@ def _export_lowered(
   cur_mesh = cur_arg = cur_k_path = None
   # lowered.args_info is a tree of the args, but we need the out avals too to
   # get the key paths for.
-  out_avals_tree = jax.tree_util.tree_unflatten(lowered.out_tree, out_avals_flat)
+  out_avals_tree = tree_util.tree_unflatten(lowered.out_tree, out_avals_flat)
   if config.use_shardy_partitioner.value:
     for sharding, (k_path, arg) in zip(
         itertools.chain.from_iterable([
             all_in_shardings, lowering.compile_args["out_shardings"]]),
         itertools.chain.from_iterable([
-            jax.tree.flatten_with_path(lowered.args_info)[0],
-            jax.tree.flatten_with_path(out_avals_tree)[0]])):
+            tree_util.tree_flatten_with_path(lowered.args_info)[0],
+            tree_util.tree_flatten_with_path(out_avals_tree)[0]])):
       if isinstance(sharding, sharding_impls.NamedSharding):
         if cur_mesh is None:
           cur_mesh, cur_arg, cur_k_path = sharding.mesh, arg, k_path
@@ -1214,7 +1216,7 @@ def expand_in_shardings(in_shardings: Sequence[LoweringSharding],
 
 def _hlo_sharding_to_gspmd_sharding(
     hlo_sharding: HloSharding | None,
-    device_assignment: Sequence[jax.Device]
+    device_assignment: Sequence[_jax.Device]
     ) -> sharding_impls.GSPMDSharding | None:
   if hlo_sharding is None:
     return None
@@ -1259,7 +1261,7 @@ def _get_vjp_fun(
 
     args_flat_jax, out_cts_flat_jax = util.split_list(args_and_out_cts_flat_jax,
                                                       [len(in_avals)])
-    _, pullback_jax = jax.vjp(primal_fun if flat_primal_fun else flattened_primal_fun_jax,
+    _, pullback_jax = api.vjp(primal_fun if flat_primal_fun else flattened_primal_fun_jax,
                               *args_flat_jax)
     return pullback_jax(out_cts_flat_jax)
 
@@ -1291,12 +1293,12 @@ def _get_vjp_fun(
 
 ### Calling the exported function
 
-def call(exported: Exported) -> Callable[..., jax.Array]:
+def call(exported: Exported) -> Callable[..., typing.Array]:
   if not isinstance(exported, Exported):
     raise ValueError(
       "The exported argument must be an export.Exported. "
       f"Found {exported}.")
-  @jax.custom_vjp
+  @custom_derivatives.custom_vjp
   def f_flat(*args_flat):
     return call_exported_p.bind(*args_flat, exported=exported)
 
@@ -1431,16 +1433,9 @@ def _call_exported_lowering(ctx: mlir.LoweringRuleContext, *args,
   submodule_bc = mlir.module_to_bytecode(submodule)
   shardy_enabled = _jax.sdy.lowered_with_shardy(submodule_bc)
   if shardy_enabled:
-    if not config.use_shardy_partitioner.value:
-      raise ValueError(
-          "The function was exported with shardy enabled but you are calling "
-          "it with Shardy disabled. Please enable Shardy using "
-          "`--jax_use_shardy_partitioner=True`.")
     submodule = ir.Module.parse(
         _jax.sdy.sdy_round_trip_import_shardings(submodule_bc)
     )
-  elif config.use_shardy_partitioner.value:
-    shardy_enabled = True
 
   with submodule.context:
     pipeline = passmanager.PassManager.parse(
@@ -1451,7 +1446,7 @@ def _call_exported_lowering(ctx: mlir.LoweringRuleContext, *args,
   if shardy_enabled:
     sdy_mesh_axes = _jax.sdy.get_mesh(mlir.module_to_bytecode(submodule))
     mesh = (mesh_lib.AbstractMesh(*list(zip(*sdy_mesh_axes))[::-1])
-            if sdy_mesh_axes else None)
+            if sdy_mesh_axes else mesh_lib.empty_abstract_mesh)
 
   axis_context = ctx.module_context.axis_context
   if isinstance(axis_context, sharding_impls.ShardingContext):
@@ -1480,19 +1475,15 @@ def _call_exported_lowering(ctx: mlir.LoweringRuleContext, *args,
       )
 
   # Apply in_shardings
-  if mesh:
-    # A mesh only exists if Shardy is enabled.
+  if shardy_enabled:
     args = tuple(
         wrap_with_sharding(
             ctx, x, x_aval,
-            _hlo_sharding_to_named_sharding(x_sharding, mesh), use_shardy=True)  # type: ignore[arg-type]
+            _hlo_sharding_to_named_sharding(x_sharding, mesh))  # type: ignore[arg-type]
         for x, x_aval, x_sharding in zip(args, ctx.avals_in, exported.in_shardings_hlo))
   else:
-    # Since there is no mesh - either due to shardy being disabled or the loaded
-    # function being lowered for GSPMD (so no shardy mesh) - need to create a
-    # GSPMD sharding from the HLO sharding (can't use shardy lowering).
     args = tuple(
-        wrap_with_sharding(ctx, x, x_aval, x_sharding, use_shardy=False)
+        wrap_with_sharding(ctx, x, x_aval, x_sharding)
         for x, x_aval, x_sharding in zip(args, ctx.avals_in, exported.in_shardings_hlo))
 
   symtab = ir.SymbolTable(submodule.operation)
@@ -1581,19 +1572,14 @@ def _call_exported_lowering(ctx: mlir.LoweringRuleContext, *args,
       for out, out_aval, refined_out_aval in zip(call.results[len(ordered_effects):],
                                                  exported.out_avals, ctx.avals_out))
   # Apply out_shardings
-  if mesh:
-    # A mesh only exists if Shardy is enabled.
+  if shardy_enabled:
     results = tuple(
         wrap_with_sharding(
-            ctx, x, x_aval, _hlo_sharding_to_named_sharding(x_sharding, mesh),
-            use_shardy=True)  # type: ignore[arg-type]
+            ctx, x, x_aval, _hlo_sharding_to_named_sharding(x_sharding, mesh))  # type: ignore[arg-type]
         for x, x_aval, x_sharding in zip(results, ctx.avals_out, exported.out_shardings_hlo))
   else:
-    # Since there is no mesh - either due to shardy being disabled or the loaded
-    # function being lowered for GSPMD (so no shardy mesh) - need to create a
-    # GSPMD sharding from the HLO sharding (can't use shardy lowering).
     results = tuple(
-        wrap_with_sharding(ctx, x, x_aval, x_sharding, use_shardy=False)
+        wrap_with_sharding(ctx, x, x_aval, x_sharding)
         for x, x_aval, x_sharding in zip(results, ctx.avals_out, exported.out_shardings_hlo))
   return results
 
@@ -1604,14 +1590,12 @@ def wrap_with_sharding(
     ctx: mlir.LoweringRuleContext,
     x: ir.Value,
     x_aval: core.AbstractValue,
-    x_sharding: sharding_impls.NamedSharding | sharding_impls.GSPMDSharding | HloSharding | None,
-    use_shardy: bool,
+    x_sharding: sharding_impls.NamedSharding | HloSharding | None,
 ) -> ir.Value:
   if x_sharding is None:
     return x
-  if use_shardy:
+  if config.use_shardy_partitioner.value:
     x_sharding = x_sharding._to_sdy_sharding(x_aval.ndim)  # type: ignore
   else:
     x_sharding = x_sharding.to_proto()  # type: ignore
-  return mlir.wrap_with_sharding_op(ctx, x, x_aval, x_sharding,  # type: ignore[arg-type]
-                                    allow_shardy_lowering=use_shardy)
+  return mlir.wrap_with_sharding_op(ctx, x, x_aval, x_sharding)  # type: ignore[arg-type]

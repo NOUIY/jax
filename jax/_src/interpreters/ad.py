@@ -107,7 +107,7 @@ def linearize_subtrace(_f: Callable, _store: lu.Store, _tag: core.TraceTag,
   nzs_out = tuple(type(t) is not Zero for t in out_tangents)
   out_tangents = tuple(t for t, nz in zip(out_tangents, nzs_out) if nz)
   out_tangents = map(partial(tangent_trace.to_jaxpr_tracer, source_info=source_info), out_tangents)  # type: ignore[assignment]
-  jaxpr, consts, attrs_tracked = tangent_trace.to_jaxpr(out_tangents, debug_info)
+  jaxpr, consts, attrs_tracked = tangent_trace.to_jaxpr(out_tangents, debug_info, source_info)
   if attrs_tracked:
     raise NotImplementedError("TODO: attrs")
   which_env = [(isinstance(c, pe.DynamicJaxprTracer) and
@@ -194,7 +194,8 @@ def _linearize_jaxpr(
   nzs_out = [type(t) is not Zero for t in out_tangents]
   out_tangents = tuple(tangent_trace.to_jaxpr_tracer(t, source_info)
                        for (nz, t) in zip(nzs_out, out_tangents) if nz)
-  tangent_jaxpr, tangent_consts, attrs_tracked = tangent_trace.to_jaxpr(out_tangents, debug_info)
+  tangent_jaxpr, tangent_consts, attrs_tracked = tangent_trace.to_jaxpr(
+      out_tangents, debug_info, source_info)
   tangent_trace.invalidate()
   if attrs_tracked:
     raise NotImplementedError("TODO: attrs")
@@ -205,7 +206,8 @@ def _linearize_jaxpr(
 
   residuals_and_primals = (*tangent_consts, *out_primals)
   residuals_and_primals = map(partial(primal_trace.to_jaxpr_tracer, source_info=source_info), residuals_and_primals)
-  primal_jaxpr, primal_consts, attrs_tracked = primal_trace.to_jaxpr(residuals_and_primals, debug_info)
+  primal_jaxpr, primal_consts, attrs_tracked = primal_trace.to_jaxpr(
+      residuals_and_primals, debug_info, source_info)
   primal_trace.invalidate()
   num_residuals = len(tangent_consts)
   tangent_jaxpr = pe.close_jaxpr(convert_constvars_jaxpr_constvars_at_end(tangent_jaxpr))
@@ -240,7 +242,8 @@ def direct_linearize(traceable: lu.WrappedFun,
   out_nzs = [type(t) is not Zero for t in out_tangents]
   out_nz_tangents = [t for t, nz in zip(out_tangents, out_nzs) if nz]
   out_nz_tangents = map(partial(tangent_trace.to_jaxpr_tracer, source_info=source_info), out_nz_tangents)
-  jaxpr, consts, attrs_tracked = tangent_trace.to_jaxpr(out_nz_tangents, traceable.debug_info)
+  jaxpr, consts, attrs_tracked = tangent_trace.to_jaxpr(
+      out_nz_tangents, traceable.debug_info, source_info)
   tangent_trace.invalidate()
   jaxpr, used_consts, _ = pe.dce_jaxpr_consts(
       jaxpr, [True] * len(jaxpr.outvars),
@@ -277,7 +280,7 @@ def linearize(traceable: lu.WrappedFun,
     raise ValueError(
         "Linearization failed to produce known values for all output primals. "
         "This is typically caused by attempting to differentiate a function "
-        "uses an operation that does not support reverse-mode autodiff.")
+        "using an operation that does not support reverse-mode autodiff.")
   out_primals_consts = [pval.get_known() for pval in out_primals_pvals]
   if not has_aux:
     return out_primals_consts, out_tangents_pvals, jaxpr, consts
@@ -501,6 +504,11 @@ class JVPTrace(Trace):
     else:
       return maybe_jvp_tracer(self, primal_out, tangent_out)
 
+  def cur_qdd(self, x):
+    p, _ = self.to_primal_tangent_pair(x)
+    with core.set_current_trace(self.parent_trace):
+      return core.cur_qdd(p)
+
   def process_call(self, call_primitive, f, tracers, params):
     assert call_primitive.multiple_results
     primals, tangents = unzip2(map(self.to_primal_tangent_pair, tracers))
@@ -564,8 +572,13 @@ class JVPTrace(Trace):
     with core.set_current_trace(self.parent_trace):
       res_and_primals_out = fwd.call_wrapped(*fwd_in)
 
-    _, res_tree = out_trees()
-    res, primals_out = split_list(res_and_primals_out, [res_tree.num_leaves])
+    _, res_tree, input_fwds = out_trees()
+    num_res_out = res_tree.num_leaves - sum(f is not None for f in input_fwds)
+    res_out, primals_out = split_list(res_and_primals_out, [num_res_out])
+    res_out_ = iter(res_out)
+    res = [next(res_out_) if f is None else primals_in[f] for f in input_fwds]
+    assert next(res_out_, None) is None
+
     avals_out = [core.get_aval(x).to_tangent_aval() for x in primals_out]
     in_zeros = [type(t) is Zero for t in tangents_in]
     nz_tangents_in = [t for z, t in zip(in_zeros, tangents_in) if not z]
@@ -628,6 +641,9 @@ class JVPTracer(Tracer):
   @property
   def aval(self):
     return get_aval(self.primal)
+
+  def cur_qdd(self):
+    return core.cur_qdd(self.primal)
 
   def full_lower(self):
     if type(self.tangent) is Zero:
@@ -726,7 +742,7 @@ class LinearizeTrace(Trace):
 
   def process_custom_vjp_call(self, prim, fun, fwd,
                               bwd: lu.WrappedFun, tracers,
-                              out_trees: Callable[[], Sequence[PyTreeDef]],
+                              out_trees: Callable[[], tuple[PyTreeDef, PyTreeDef, list[int | None]]],
                               symbolic_zeros: bool):
     primals_in, tangents_in = unzip2(map(self.to_primal_tangent_pair, tracers))
     if all(type(t) is Zero for t in tangents_in):
@@ -738,8 +754,12 @@ class LinearizeTrace(Trace):
     with core.set_current_trace(self.parent_trace):
       res_and_primals_out = fwd.call_wrapped(*fwd_in_flat)
 
-    _, res_tree = out_trees()
-    res, primals_out = split_list(res_and_primals_out, [res_tree.num_leaves])
+    _, res_tree, input_fwds = out_trees()
+    num_res_out = res_tree.num_leaves - sum(f is not None for f in input_fwds)
+    res_out, primals_out = split_list(res_and_primals_out, [num_res_out])
+    res_out_ = iter(res_out)
+    res = [next(res_out_) if f is None else primals_in[f] for f in input_fwds]
+    assert next(res_out_, None) is None
     avals_out = [core.get_aval(x).to_tangent_aval() for x in primals_out]
 
     in_zeros = [type(t) is Zero for t in tangents_in]
@@ -1170,8 +1190,8 @@ def _jvp_jaxpr(jaxpr: core.ClosedJaxpr,
   f_jvp, out_nonzeros = f_jvp_traceable(
       jvp(f, instantiate=instantiate, transform_stack=False), nonzeros)
   tangent_avals = [aval.to_tangent_aval()
-                   for aval, nz in zip(jaxpr.in_avals_aug, nonzeros) if nz]
-  avals_in = list(it.chain(jaxpr.in_avals_aug, tangent_avals))
+                   for aval, nz in zip(jaxpr.in_aval_qdds, nonzeros) if nz]
+  avals_in = list(it.chain(jaxpr.in_aval_qdds, tangent_avals))
   jaxpr_out, avals_out, literals_out, () = pe.trace_to_jaxpr_dynamic(
       f_jvp, avals_in)
   return core.ClosedJaxpr(jaxpr_out, literals_out), out_nonzeros()

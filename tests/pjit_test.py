@@ -46,6 +46,7 @@ from jax._src.shard_map import shard_map
 from jax._src.compilation_cache import is_persistent_cache_enabled
 from jax.experimental.custom_partitioning import (
     custom_partitioning, SdyShardingRule, BATCHING)
+from jax.experimental import primal_tangent_dtype
 from jax._src import array
 from jax._src.sharding import Sharding, common_devices_indices_map
 from jax._src import op_shardings
@@ -3770,6 +3771,21 @@ class ArrayPjitTest(jtu.JaxTestCase):
       out3 = vf(out2)
       self.assertIsInstance(out3.sharding, NamedSharding)
     self.assertEqual(count(), 1)
+
+  @config.numpy_dtype_promotion('standard')
+  def test_mutable_array_closed_over_multi_device(self):
+    mesh = jtu.create_mesh((2,), ('x',))
+    key_data = jax.random.key_data(jax.random.key(42))
+    key_data_ref = core.mutable_array(key_data)
+    output_sharding = NamedSharding(mesh, P('x'))
+
+    @partial(jax.jit, out_shardings=output_sharding)
+    def generate_random_numbers():
+      key_val = key_data_ref[...]
+      outputs = jnp.arange(8, dtype=jnp.float32) + key_val[0]
+      return outputs
+
+    generate_random_numbers()  # doesn't crash
 
   @jtu.thread_unsafe_test()  # cache_info isn't thread-safe
   def test_jit_mul_sum_sharding_preserved(self):
@@ -7773,7 +7789,7 @@ class ShardingInTypesTest(jtu.JaxTestCase):
   @config.use_shardy_partitioner(True)
   @jtu.with_explicit_mesh((2, 2), ('x', 'y'))
   def test_unreduced_basic(self, mesh):
-    np_inp = np.arange(16).reshape(8, 2)
+    np_inp = np.arange(16.).reshape(8, 2)
     x = jax.device_put(np_inp, P('x', 'y'))
     y = jax.device_put(np_inp.T, P('y', None))
     a = jax.device_put(np_inp, P('x', 'y'))
@@ -7794,10 +7810,24 @@ class ShardingInTypesTest(jtu.JaxTestCase):
       self.assertEqual(out.aval.sharding.spec, P('x', None))
       return out
 
+    out = f(x, y, a, b)
+    self.assertArraysEqual(out, (np_inp @ np_inp.T) + (np_inp @ np_inp.T))
+
     traced = f.trace(x, y, a, b)
     lowered_text = traced.lower().as_text()
     self.assertIn('unreduced={"y"}', lowered_text)
-    self.assertTrue(lowered_text.count('unreduced={"y"}') == 3)
+    self.assertEqual(lowered_text.count('unreduced={"y"}'), 3)
+
+    f_bar = jax.jit(jax.grad(lambda x, y, a, b: f(x, y, a, b).sum(),
+                             argnums=(0, 1, 2, 3)))
+    f_bar(x, y, a, b)  # doesn't crash
+
+    grad_jaxpr = f_bar.trace(x, y, a, b).jaxpr
+    reshard_eqn = grad_jaxpr.eqns[4].params['jaxpr'].eqns[0]
+    self.assertEqual(reshard_eqn.params['dst_sharding'].spec.reduced,
+                     frozenset('y'))
+    self.assertEqual(reshard_eqn.params['dst_sharding'].spec.unreduced,
+                     frozenset())
 
   @jtu.with_explicit_mesh((2, 2, 1), ('x', 'y', 'z'))
   def test_dot_general_unreduced_error(self, mesh):
@@ -7927,6 +7957,20 @@ class ShardingInTypesTest(jtu.JaxTestCase):
                        P(None, 'x', None))
 
     jax.lax.map(lambda _x: simple_func(w, _x), x, batch_size=2)  # doesn't crash
+
+  @jtu.with_explicit_mesh((2,), ('x',))
+  def test_extended_dtypes(self, mesh):
+    dtype = primal_tangent_dtype(jnp.dtype('int8'), jnp.dtype('bfloat16'))
+
+    @jax.jit
+    def f(x):
+      x = jax.lax.convert_element_type(x, dtype)
+      self.assertEqual(x.aval.sharding.spec, P('x'))
+      x = jax.lax.convert_element_type(x, 'int8')
+      self.assertEqual(x.aval.sharding.spec, P('x'))
+
+    x = jax.device_put(jnp.arange(8, dtype='int8'), P('x',))
+    f(x)  # doesn't crash
 
 
 @jtu.pytest_mark_if_available('multiaccelerator')
@@ -8201,7 +8245,8 @@ class PJitErrorTest(jtu.JaxTestCase):
 
   def test_named_sharding_of_none(self):
     mesh = jtu.create_mesh((2,), ('x',))
-    with self.assertRaisesRegex(TypeError, 'Unexpected None'):
+    with self.assertRaisesRegex(
+        TypeError, '(Unexpected None|incompatible function arguments)'):
       jax.NamedSharding(mesh, None)
 
 
