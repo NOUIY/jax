@@ -45,7 +45,7 @@ class PyTreeRegistry:
   def flatten_with_path(
       self,
       tree: Any,
-      leaf_predicate: Callable[[Any], bool] | None = ...,
+      leaf_predicate: Callable[[Any, Any], bool] | None = ...,
   ) -> Tuple[list[Tuple[_KeyPath, Any]], PyTreeDef]: ...
   def register_node(
       self,
@@ -121,12 +121,6 @@ class PyTreeDef:
   def from_iterable_tree(self, __xs: Any): ...
   def node_data(self) -> Tuple[type, Any] | None: ...
   def children(self) -> list[PyTreeDef]: ...
-  @staticmethod
-  def make_from_node_data_and_children(
-      registry: PyTreeRegistry,
-      node_data: Tuple[type, Any] | None,
-      children: Iterable[PyTreeDef],
-  ) -> PyTreeDef: ...
 
   num_leaves: int
   num_nodes: int

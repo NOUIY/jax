@@ -311,11 +311,6 @@ class PyTreeDef {
   std::optional<std::pair<nanobind::object, nanobind::object>> GetNodeData()
       const;
 
-  static nb_class_ptr<PyTreeDef> MakeFromNodeDataAndChildren(
-      nb_class_ptr<PyTreeRegistry> registry,
-      std::optional<std::pair<nanobind::object, nanobind::object>> node_data,
-      nanobind::iterable children);
-
   static PyType_Slot slots_[];
 
  private:
@@ -367,9 +362,10 @@ class PyTreeDef {
       const;
 
   template <typename T>
-  void FlattenImpl(nanobind::handle handle, T& leaves,
-                   const std::optional<nanobind::callable>& leaf_predicate,
-                   std::optional<std::vector<nanobind::object>>& keypath);
+  void FlattenImpl(
+      nanobind::handle handle, T& leaves,
+      std::optional<std::vector<nanobind::object>>& keypath,
+      const std::optional<nanobind::callable>& leaf_predicate);
 
   template <typename T>
   nanobind::object UnflattenImpl(T leaves) const;

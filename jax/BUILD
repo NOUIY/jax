@@ -210,6 +210,7 @@ py_library(
     deps = [
         ":compilation_cache_internal",
         ":jax",
+        ":public_test_util",
     ] + py_deps("absl/testing") + py_deps("numpy"),
 )
 
@@ -294,29 +295,16 @@ py_library_providing_imports_info(
     name = "jax",
     srcs = [
         "_src/__init__.py",
-        "_src/ad_checkpoint.py",
-        "_src/api.py",  # TODO(vanderplas): remove this and depend on :api instead
-        "_src/array.py",  # TODO(vanderplas): remove this and depend on :api instead
+        "_src/ad_checkpoint.py",  # TODO(vanderplas): remove once downstream users depend on :lax
         "_src/blocked_sampler.py",
-        "_src/buffer_callback.py",
-        "_src/callback.py",
         "_src/checkify.py",
-        "_src/custom_batching.py",
-        "_src/custom_partitioning.py",
         "_src/debugging.py",
-        "_src/dispatch.py",  # TODO(vanderplas): remove this and depend on :api instead
         "_src/dlpack.py",
-        "_src/earray.py",
         "_src/error_check.py",
-        "_src/ffi.py",
         "_src/flatten_util.py",
         "_src/interpreters/__init__.py",
-        "_src/interpreters/pxla.py",  # TODO(vanderplas): remove this and depend on :api instead
-        "_src/pjit.py",  # TODO(vanderplas): remove this and depend on :api instead
         "_src/prng.py",
-        "_src/public_test_util.py",
         "_src/random.py",
-        "_src/shard_alike.py",
         "_src/shard_map.py",
     ] + glob(
         [
@@ -324,14 +312,14 @@ py_library_providing_imports_info(
             "_src/cudnn/**/*.py",
             "_src/debugger/**/*.py",
             "_src/image/**/*.py",
-            "_src/export/**/*.py",
-            "_src/lax/**/*.py",
+            "_src/lax/**/*.py",  # TODO(vanderplas): remove once downstream users depend on :lax
             "_src/nn/**/*.py",
             "_src/numpy/**/*.py",
             "_src/ops/**/*.py",
             "_src/scipy/**/*.py",
-            "_src/state/**/*.py",
+            "_src/state/**/*.py",  # TODO(vanderplas): remove once downstream users depend on :lax and :state_types
             "_src/third_party/**/*.py",
+            "_src/tpu/**/*.py",
             "experimental/key_reuse/**/*.py",
             "experimental/roofline/**/*.py",
             "image/**/*.py",
@@ -373,11 +361,13 @@ py_library_providing_imports_info(
         ":abstract_arrays",
         ":ad",
         ":ad_util",
-        # ":api",   # TODO(vanderplas): add this dependency once downstream targets are fixed
+        ":api",
         ":api_util",
         ":attrs",
         ":basearray",
         ":batching",
+        ":buffer_callback",
+        ":callback",
         ":cloud_tpu_init",
         ":compilation_cache_internal",
         ":compiler",
@@ -385,16 +375,23 @@ py_library_providing_imports_info(
         ":config",
         ":core",
         ":custom_api_util",
+        ":custom_batching",
         ":custom_dce",
         ":custom_derivatives",
+        ":custom_partitioning",
         ":custom_partitioning_sharding_rule",
         ":custom_transpose",
         ":deprecations",
         ":dtypes",
+        ":earray",
         ":effects",
         ":environment_info",
+        ":export",
+        ":ffi",
+        ":hashable_array",
         ":internal_mesh_utils",
         ":jaxpr_util",
+        ":lax",
         ":layout",
         ":lazy_loader",
         ":mesh",
@@ -408,6 +405,8 @@ py_library_providing_imports_info(
         ":pickle_util",
         ":pretty_printer",
         ":profiler",
+        ":public_test_util",
+        ":shard_alike",
         ":sharding",
         ":sharding_impls",
         ":sharding_specs",
@@ -542,6 +541,48 @@ pytype_strict_library(
 )
 
 pytype_strict_library(
+    name = "buffer_callback",
+    srcs = ["_src/buffer_callback.py"],
+    deps = [
+        ":ad",
+        ":api",
+        ":batching",
+        ":core",
+        ":effects",
+        ":ffi",
+        ":mlir",
+        ":tree_util",
+        ":util",
+        "//jax/_src/lib",
+    ] + py_deps("numpy"),
+)
+
+pytype_strict_library(
+    name = "callback",
+    srcs = ["_src/callback.py"],
+    deps = [
+        ":ad",
+        ":api",
+        ":batching",
+        ":config",
+        ":core",
+        ":dtypes",
+        ":effects",
+        ":ffi",
+        ":mlir",
+        ":pickle_util",
+        ":sharding",
+        ":sharding_impls",
+        ":tree_util",
+        ":typing",
+        ":util",
+        ":xla",
+        ":xla_bridge",
+        "//jax/_src/lib",
+    ] + py_deps("numpy"),
+)
+
+pytype_strict_library(
     name = "cloud_tpu_init",
     srcs = ["_src/cloud_tpu_init.py"],
     deps = [
@@ -583,6 +624,59 @@ pytype_strict_library(
         ":path",
         ":util",
     ],
+)
+
+py_library_providing_imports_info(
+    name = "lax",
+    srcs = glob(
+        [
+            "_src/lax/**/*.py",
+            "_src/state/**/*.py",
+        ],
+        exclude = [
+            # These are included in :state_types.
+            "_src/state/__init__.py",
+            "_src/state/indexing.py",
+            "_src/state/types.py",
+        ],
+    ) + [
+        "_src/ad_checkpoint.py",
+    ],
+    visibility = [":internal"] + jax_visibility("lax"),
+    deps = [
+        ":abstract_arrays",
+        ":ad",
+        ":ad_util",
+        ":api",
+        ":api_util",
+        ":attrs",
+        ":batching",
+        ":callback",
+        ":config",
+        ":core",
+        ":custom_derivatives",
+        ":custom_partitioning_sharding_rule",
+        ":dtypes",
+        ":effects",
+        ":ffi",
+        ":mesh",
+        ":mlir",
+        ":named_sharding",
+        ":partial_eval",
+        ":partition_spec",
+        ":pretty_printer",
+        ":sharding",
+        ":sharding_impls",
+        ":source_info_util",
+        ":state_types",
+        ":traceback_util",
+        ":tree_util",
+        ":typing",
+        ":util",
+        ":xla",
+        ":xla_bridge",
+        "//jax/_src/lib",
+    ] + py_deps("numpy"),
 )
 
 pytype_strict_library(
@@ -659,6 +753,26 @@ pytype_strict_library(
 )
 
 pytype_strict_library(
+    name = "custom_batching",
+    srcs = ["_src/custom_batching.py"],
+    deps = [
+        ":ad",
+        ":api",
+        ":api_util",
+        ":batching",
+        ":core",
+        ":custom_api_util",
+        ":mlir",
+        ":partial_eval",
+        ":source_info_util",
+        ":traceback_util",
+        ":tree_util",
+        ":util",
+        ":xla",
+    ],
+)
+
+pytype_strict_library(
     name = "custom_dce",
     srcs = ["_src/custom_dce.py"],
     deps = [
@@ -698,6 +812,27 @@ pytype_strict_library(
         ":util",
         ":xla",
     ],
+)
+
+pytype_strict_library(
+    name = "custom_partitioning",
+    srcs = ["_src/custom_partitioning.py"],
+    deps = [
+        ":api",
+        ":api_util",
+        ":config",
+        ":core",
+        ":custom_api_util",
+        ":custom_partitioning_sharding_rule",
+        ":mesh",
+        ":mlir",
+        ":partial_eval",
+        ":sharding",
+        ":sharding_impls",
+        ":tree_util",
+        ":xla_bridge",
+        "//jax/_src/lib",
+    ] + py_deps("numpy"),
 )
 
 pytype_strict_library(
@@ -747,6 +882,21 @@ pytype_strict_library(
 )
 
 pytype_strict_library(
+    name = "earray",
+    srcs = ["_src/earray.py"],
+    deps = [
+        ":api",
+        ":basearray",
+        ":core",
+        ":sharding_impls",
+        ":tree_util",
+        ":util",
+        ":xla",
+        "//jax/_src/lib",
+    ] + py_deps("numpy"),
+)
+
+pytype_strict_library(
     name = "effects",
     srcs = ["_src/effects.py"],
 )
@@ -762,8 +912,66 @@ pytype_strict_library(
 )
 
 pytype_strict_library(
+    name = "export",
+    srcs = glob([
+        "_src/export/**/*.py",
+    ]),
+    visibility = [":internal"] + jax_visibility("export"),
+    deps = [
+        ":ad_util",
+        ":api",
+        ":config",
+        ":core",
+        ":custom_derivatives",
+        ":dtypes",
+        ":effects",
+        ":mesh",
+        ":mlir",
+        ":sharding",
+        ":sharding_impls",
+        ":source_info_util",
+        ":stages",
+        ":tree_util",
+        ":typing",
+        ":util",
+        ":xla_bridge",
+        "//jax/_src/lib",
+    ] + py_deps("flatbuffers") + py_deps("numpy") + py_deps("opt_einsum"),
+)
+
+pytype_strict_library(
+    name = "ffi",
+    srcs = ["_src/ffi.py"],
+    deps = [
+        ":ad",
+        ":api",
+        ":batching",
+        ":core",
+        ":effects",
+        ":hashable_array",
+        ":layout",
+        ":mlir",
+        ":typing",
+        ":util",
+        ":xla_bridge",
+        "//jax/_src/lib",
+    ] + py_deps("numpy"),
+)
+
+pytype_strict_library(
+    name = "frozen_dict",
+    srcs = ["_src/frozen_dict.py"],
+)
+
+pytype_strict_library(
     name = "hardware_utils",
     srcs = ["_src/hardware_utils.py"],
+)
+
+pytype_strict_library(
+    name = "hashable_array",
+    srcs = ["_src/hashable_array.py"],
+    deps = py_deps("numpy"),
 )
 
 pytype_library(
@@ -848,6 +1056,7 @@ pytype_strict_library(
         ":core",
         ":dtypes",
         ":effects",
+        ":hashable_array",
         ":jaxpr_util",
         ":layout",
         ":mesh",
@@ -931,7 +1140,9 @@ pytype_strict_library(
     deps = [
         ":deprecations",
         ":jax",
+        ":lax",
         ":source_info_util",
+        ":state_types",
         "//jax/_src/pallas",
     ] + py_deps("numpy"),
 )
@@ -999,6 +1210,7 @@ pytype_strict_library(
         ":pallas",
         ":pallas_mosaic_gpu",
         ":test_util",  # This is only to make them runnable as jax_multiplatform_test...
+        "//jax/_src/lib",
     ] + py_deps("numpy"),
 )
 
@@ -1063,6 +1275,12 @@ pytype_strict_library(
 py_library_providing_imports_info(
     name = "mosaic_gpu",
     srcs = glob(["experimental/mosaic/gpu/*.py"]),
+    data = [
+        "@cuda_nvcc//:nvdisasm",
+        "@cuda_nvcc//:nvvm",
+        "@cuda_nvcc//:ptxas",
+        "@nvidia_nvshmem//:libnvshmem_device",
+    ],
     visibility = [
         ":mosaic_gpu_users",
     ],
@@ -1113,6 +1331,10 @@ pytype_strict_library(
 pytype_strict_library(
     name = "partition_spec",
     srcs = ["_src/partition_spec.py"],
+    deps = [
+        ":util",
+        "//jax/_src/lib",
+    ],
 )
 
 pytype_strict_library(
@@ -1151,7 +1373,8 @@ pytype_strict_library(
     deps = [
         ":config",
         ":util",
-    ] + py_deps("colorama"),
+        "//jax/_src/lib",
+    ],
 )
 
 pytype_strict_library(
@@ -1165,12 +1388,43 @@ pytype_strict_library(
 )
 
 pytype_strict_library(
+    name = "public_test_util",
+    srcs = [
+        "_src/public_test_util.py",
+    ],
+    deps = [
+        ":api",
+        ":config",
+        ":dtypes",
+        ":tree_util",
+    ] + py_deps("numpy"),
+)
+
+pytype_strict_library(
     name = "sharding",
     srcs = ["_src/sharding.py"],
     deps = [
         ":op_shardings",
         ":util",
         ":xla_bridge",
+        "//jax/_src/lib",
+    ],
+)
+
+pytype_strict_library(
+    name = "shard_alike",
+    srcs = [
+        "_src/shard_alike.py",
+    ],
+    deps = [
+        ":ad",
+        ":api",
+        ":batching",
+        ":config",
+        ":core",
+        ":mlir",
+        ":tree_util",
+        ":util",
         "//jax/_src/lib",
     ],
 )
@@ -1297,6 +1551,7 @@ pytype_strict_library(
         "_src/state/indexing.py",
         "_src/state/types.py",
     ],
+    visibility = [":internal"] + jax_visibility("state_types"),
     deps = [
         ":core",
         ":dtypes",
@@ -1314,6 +1569,7 @@ pytype_strict_library(
     srcs = ["_src/tree.py"],
     deps = [
         ":tree_util",
+        "//jax/_src/lib",
     ],
 )
 
@@ -1441,6 +1697,7 @@ py_library_providing_imports_info(
     ),
     visibility = ["//visibility:public"],
     deps = [
+        ":buffer_callback",
         ":jax",
     ] + py_deps("absl/logging") + py_deps("numpy"),
 )
@@ -1469,7 +1726,10 @@ pytype_library(
         exclude = ["experimental/sparse/test_util.py"],
     ),
     visibility = ["//visibility:public"],
-    deps = [":jax"],
+    deps = [
+        ":ffi",
+        ":jax",
+    ],
 )
 
 pytype_library(

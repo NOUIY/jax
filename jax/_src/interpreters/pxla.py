@@ -68,7 +68,7 @@ from jax._src.mesh import (AbstractMesh, Mesh, get_abstract_mesh,
 from jax._src.sharding_impls import (
     ArrayMapping, ArrayMappingOrAutoOrUnspecified, AUTO, UnspecifiedValue,
     get_array_mapping as _get_array_mapping, array_mapping_to_axis_resources,
-    SingleDeviceSharding, GSPMDSharding, NamedSharding, PositionalSharding,
+    SingleDeviceSharding, GSPMDSharding, NamedSharding,
     PartitionSpec as P)
 from jax._src.util import (safe_map, safe_zip, partition_list, wrap_name,
                            tuple_update, tuple_delete, distributed_debug_log,
@@ -1066,7 +1066,6 @@ class UnloadedPmapExecutable:
         num_partitions=num_partitions,
         device_assignment=device_assignment,
         use_spmd_partitioning=False,
-        use_shardy_partitioner=config.use_shardy_partitioner.value,
         env_options_overrides=compiler_options,
         detailed_logging=compiler.use_detailed_logging(hlo),
         backend=pci.backend,
@@ -2094,8 +2093,10 @@ def _discharge_refs_jaxpr(closed_jaxpr, in_shardings, in_layouts,
                           donated_invars, out_shardings, out_layouts):
   if any(isinstance(e, RefEffect) for e in closed_jaxpr.effects):
     closed_jaxpr, inout_aliases, mut = _discharge_refs(closed_jaxpr)
-    in_shardings = (*in_shardings, *(c.sharding for c in mut.in_mut))
-    in_layouts = (*in_layouts, *(c.format.dll for c in mut.in_mut))
+    in_shardings = (*in_shardings, *(
+        pjit.finalize_arg_sharding(c.sharding, c.committed) for c in mut.in_mut))
+    in_layouts = (*in_layouts, *(c.format.dll if hasattr(c, 'format') else None
+                                 for c in mut.in_mut))
     donated_invars = (*donated_invars,) + (False,) * len(mut.in_mut)
     out_layouts_ = iter(zip(out_shardings, out_layouts))
     out_shardings, out_layouts = unzip2(
@@ -2548,15 +2549,6 @@ def _gspmd_to_named_sharding(
   return sharding_impls._gspmd_to_named_sharding_via_mesh(out_s, mesh)
 _orig_out_sharding_handlers[NamedSharding] = _gspmd_to_named_sharding
 
-def _gspmd_to_positional_sharding(
-    out_s: GSPMDSharding, out_aval, orig_in_s: PositionalSharding
-    ) -> PositionalSharding:
-  assert isinstance(out_s, GSPMDSharding)
-  assert isinstance(orig_in_s, PositionalSharding)
-  return sharding_impls._op_sharding_to_pos_sharding(
-      out_s._hlo_sharding, orig_in_s._device_assignment, out_s.memory_kind)
-_orig_out_sharding_handlers[PositionalSharding] = _gspmd_to_positional_sharding  # type: ignore
-
 def _gspmd_to_single_device_sharding(
     out_s: GSPMDSharding, out_aval, orig_in_s: SingleDeviceSharding
     ) -> SingleDeviceSharding:
@@ -2699,7 +2691,6 @@ def create_compile_options(
       num_partitions=num_partitions,
       device_assignment=xla_device_assignment,
       use_spmd_partitioning=spmd_lowering,
-      use_shardy_partitioner=config.use_shardy_partitioner.value,
       use_auto_spmd_partitioning=auto_spmd_lowering,
       env_options_overrides=compiler_options,
       fdo_profile=fdo_profile,

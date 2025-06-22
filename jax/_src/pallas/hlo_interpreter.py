@@ -27,7 +27,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from functools import reduce, partial
 import itertools
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 
 import jax
 from jax import lax
@@ -235,8 +236,7 @@ def pad_jaxpr_constvars(jaxpr: jax_core.Jaxpr,
   to pad each Jaxpr with all consts from all branches so the
   signatures match, but only use the consts for this branch.
   """
-  newvar = jax_core.gensym(suffix='_')
-  unused_const_vars = [tuple(map(newvar, const_avals))
+  unused_const_vars = [tuple(map(jax_core.Var, const_avals))
                        for const_avals in all_const_avals]
   const_prefix = util.concatenate(unused_const_vars[:i])
   const_suffix = util.concatenate(unused_const_vars[i + 1:])

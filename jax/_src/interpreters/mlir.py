@@ -38,6 +38,7 @@ from jax._src import config
 from jax._src import core
 from jax._src import dtypes
 from jax._src import effects as effects_lib
+from jax._src import hashable_array
 from jax._src import jaxpr_util
 from jax._src import linear_util as lu
 from jax._src import path
@@ -383,6 +384,8 @@ def _numpy_array_attribute_handler(val: np.ndarray | np.generic) -> ir.Attribute
     return _numpy_array_attribute(val)
 
 register_attribute_handler(np.ndarray, _numpy_array_attribute_handler)
+register_attribute_handler(hashable_array.HashableArray,
+                           lambda x: _numpy_array_attribute_handler(x.val))
 
 for _scalar_type in [np.int8, np.int16, np.int32, np.int64,
                      np.uint8, np.uint16, np.uint32, np.uint64,
@@ -2082,8 +2085,8 @@ def _platforms_for_eqn_ctx(eqn_ctx: core.JaxprEqnContext | None
 
 def _platforms_for_eqn(ctx: LoweringRuleContext) -> tuple[str, ...]:
   """The lowering platforms for the current eqn"""
-  return tuple((_platforms_for_eqn_ctx(ctx.jaxpr_eqn_ctx) or
-               ctx.platforms or ctx.module_context.platforms))
+  return tuple(_platforms_for_eqn_ctx(ctx.jaxpr_eqn_ctx) or
+               ctx.platforms or ctx.module_context.platforms)
 
 
 def lower_per_platform(ctx: LoweringRuleContext,
@@ -2731,7 +2734,7 @@ def lower_with_sharding_in_types(ctx, op, aval, sharding_proto=None):
 
 
 def set_sharding(op, sharding: xc.OpSharding | SdyArray | SdyArrayList):
-  if isinstance(sharding, (SdyArray, SdyArrayList)):
+  if config.use_shardy_partitioner.value:
     op.attributes["sdy.sharding"] = get_sharding_attr(sharding)
   else:
     op.attributes["mhlo.sharding"] = get_sharding_attr(sharding)
@@ -2740,7 +2743,7 @@ def set_sharding(op, sharding: xc.OpSharding | SdyArray | SdyArrayList):
 def get_sharding_attr(
     sharding: xc.OpSharding | SdyArray | SdyArrayList
 ) -> ir.Attribute:
-  if isinstance(sharding, (SdyArray, SdyArrayList)):
+  if config.use_shardy_partitioner.value:
     return sharding.build()  # type: ignore
   else:
     # If there are very large numbers of devices, use the proto representation.

@@ -35,21 +35,10 @@ from .launch_context import LaunchContext
 
 TMEM_ROWS = 128
 TCGEN05_SMEM_DESCRIPTOR_BIT = 1 << 46
-# Like WGMMA_LAYOUT, only each warp holds a 32xN strip instead of 16xN.
-# The name is so short, because it's meant to be used qualified (tcgen05.LAYOUT)
-LAYOUT = fa.TiledLayout(
-    fa.Tiling(((128, 8), (32, 8), (8, 8), (1, 2))),
-    warp_dim=-8,
-    lane_dims=(-4, -3),
-    vector_dim=-1,
-)
-# ROW_LAYOUT is to LAYOUT as WGMMA_ROW_LAYOUT is to WGMMA_LAYOUT.
-ROW_LAYOUT = fa.TiledLayout(
-    fa.Tiling(tiles=((128,), (32,), (8,), (1,), (1,))),
-    warp_dim=-5,
-    lane_dims=(-3, fa.Replicated(times=4)),
-    vector_dim=-1
-)
+LAYOUT = fa.TCGEN05_LAYOUT
+ROW_LAYOUT = fa.TCGEN05_ROW_LAYOUT
+COL_LAYOUT = fa.TCGEN05_COL_LAYOUT
+
 # A layout resembling the logical organization of TMEM. The 128 rows in a tile
 # are assigned to 128 lanes in the warpgroup. Useful when the result needs to be
 # processed in registers and then stored back into TMEM. Should not be used if
@@ -74,45 +63,40 @@ def create_instr_descriptor(
     transpose_a: bool = False,
     transpose_b: bool = False,
 ):
-  f32 = ir.F32Type.get()
-  bf16 = ir.BF16Type.get()
   f16 = ir.F16Type.get()
-  if acc_dtype not in {f32, f16}:
-    raise NotImplementedError("Only float32 and float16 accumulators supported")
-  if utils.bitwidth(input_dtype) == 16:
-    if input_dtype not in {f16, bf16}:
-      raise NotImplementedError(
-          "The only supported 16-bit input types are float16 and bfloat16, got"
-          f" {input_dtype}"
-      )
-    desc = 0
-    desc |= (acc_dtype == f32) << 4  # D dtype, bits 4-5
-    # Bit 6 is reserved
-    desc |= (input_dtype == bf16) << 7  # A dtype, bits 7-9
-    desc |= (input_dtype == bf16) << 10  # B dtype, bits 10-12
-    return _finish_instr_descriptor(desc, m, n, transpose_a, transpose_b)
-  elif utils.bitwidth(input_dtype) == 8:
-    desc = 0
-    desc |= (acc_dtype == f32) << 4  # D dtype, bits 4-5
-    # Bit 6 is reserved
-    if input_dtype == ir.Float8E4M3FNType.get():
-      input_dtype_enum = 0
-    elif input_dtype == ir.Float8E5M2Type.get():
-      input_dtype_enum = 1
-    else:
-      raise NotImplementedError(f"Unsupported input dtype: {input_dtype}")
-    desc |= input_dtype_enum << 7  # A dtype, bits 7-9
-    desc |= input_dtype_enum << 10  # B dtype, bits 10-12
-    return _finish_instr_descriptor(desc, m, n, transpose_a, transpose_b)
+  f32 = ir.F32Type.get()
+  i32 = ir.IntegerType.get_signless(32)
+
+  desc = 0
+  if acc_dtype == f16:
+    d_type_val = 0
+  elif acc_dtype == f32:
+    d_type_val = 1
+  elif acc_dtype == i32:
+    d_type_val = 2
+  else:
+    raise NotImplementedError(f"Unsupported accumulator dtype: {acc_dtype}")
+  desc |= (d_type_val << 4)  # D type, bits 4-5
+  # Bit 6 is reserved
+  if input_dtype == f16:
+    assert acc_dtype in {f16, f32}
+    ab_type_val = 0
+  elif input_dtype == ir.BF16Type.get():
+    assert acc_dtype == f32
+    ab_type_val = 1
+  elif input_dtype == ir.Float8E4M3FNType.get():
+    assert acc_dtype in {f16, f32}
+    ab_type_val = 0
+  elif input_dtype == ir.Float8E5M2Type.get():
+    assert acc_dtype in {f16, f32}
+    ab_type_val = 1
+  elif input_dtype == ir.IntegerType.get_signless(8):  # Only s8 for now.
+    assert acc_dtype == i32
+    ab_type_val = 1
   else:
     raise NotImplementedError(f"Unsupported input dtype: {input_dtype}")
-
-
-def _finish_instr_descriptor(
-    desc: int, m: int, n: int, transpose_a: bool, transpose_b: bool,
-):
-  # We ignore sparsity in bits 0-3
-  # A, B and D types are set by the caller
+  desc |= (ab_type_val << 7)   # A dtype, bits 7-9
+  desc |= (ab_type_val << 10)  # B dtype, bits 10-12
   # We ignore negate bits 13-14
   desc |= transpose_a << 15  # Transpose A
   desc |= transpose_b << 16  # Transpose B
@@ -156,8 +140,8 @@ def mma(
   if isinstance(a, TMEMRef):
     m, k2 = a.shape
     element_type2 = a.dtype
-    if collective:
-      raise NotImplementedError("Collective not supported for TMEMRef")
+    if collective and n * num_cta == 512:
+      raise NotImplementedError("Collective MMA with N=512 is not supported")
     if a.layout != (expected_layout := _infer_tmem_layout(a.shape, packing=2)):
       raise ValueError(
           f"A layout mismatch: expected {expected_layout}, got {a.layout}"
@@ -191,6 +175,7 @@ def mma(
     )
   f32 = ir.F32Type.get()
   f16 = ir.F16Type.get()
+  s32 = ir.IntegerType.get_signless(32)
   if element_type == f32 or element_type == ir.BF16Type.get():
     if d.dtype != f32:
       raise ValueError(
@@ -205,6 +190,12 @@ def mma(
       raise ValueError(
           f"MMA with element type {element_type} only supports accumulators of"
           f" type f32 or f16, but got: {d.dtype}"
+      )
+  elif element_type == ir.IntegerType.get_signless(8):
+    if d.dtype != s32:
+      raise ValueError(
+          "MMA with element type s8 only supports s32 accumulators, but got:"
+          f" {d.dtype}"
       )
   else:
     raise NotImplementedError(f"Unsupported element type: {element_type}")
@@ -327,6 +318,8 @@ def _do_mma(
     kind = "f8f6f4"
   elif ir.Float8E4M3FNType.isinstance(element_type):
     kind = "f8f6f4"
+  elif ir.IntegerType.get_signless(8).isinstance(element_type):
+    kind = "i8"
   else:
     raise NotImplementedError(f"Unsupported input element type: {element_type}")
 
@@ -674,7 +667,8 @@ class TMEMRef:
       raise NotImplementedError("TMEM cannot be sliced along rows")
     if slice_shape[1] % 8:
       raise NotImplementedError(
-          "TMEM column slice length must be a multiple of 8"
+          "TMEM column slice length must be a multiple of 8. "
+          f"Got {slice_shape[1]}."
       )
     col_idx = base_idx[1]
     if not isinstance(col_idx, ir.Value):
@@ -690,7 +684,7 @@ class TMEMRef:
         dtype=self.dtype,
     )
 
-  def load(self, layout: fa.TiledLayout = LAYOUT):
+  def load(self, layout: fa.TiledLayout = LAYOUT, is_signed: bool | None = None):
     i32 = ir.IntegerType.get_signless(32)
     if self.shape[1] % 8:
       raise NotImplementedError
@@ -750,7 +744,9 @@ class TMEMRef:
           "TMEM loads can only produce results in the tcgen05 layouts"
           f" ({LAYOUT} and {TMEM_NATIVE_LAYOUT}), but got: {layout}"
       )
-    return fa.FragmentedArray(_registers=registers, _layout=layout, _is_signed=None)
+    return fa.FragmentedArray(
+        _registers=registers, _layout=layout, _is_signed=is_signed
+    )
 
   def store(self, value):
     if self.shape[1] % 8:

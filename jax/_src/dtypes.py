@@ -373,7 +373,8 @@ def _scalar_type_to_dtype(typ: type, value: Any = None) -> DType:
   """
   dtype = canonicalize_dtype(python_scalar_dtypes[typ])
   if typ is int and value is not None:
-    if value < np.iinfo(dtype).min or value > np.iinfo(dtype).max:
+    iinfo = np.iinfo(dtype)
+    if value < iinfo.min or value > iinfo.max:
       raise OverflowError(f"Python int {value} too large to convert to {dtype}")
   return dtype
 
@@ -983,6 +984,7 @@ def primal_tangent_dtype(primal_dtype, tangent_dtype,
 
   return PrimalTangentDType()
 
+@functools.cache
 def short_dtype_name(dtype) -> str:
   if isinstance(dtype, ExtendedDType):
     return str(dtype)

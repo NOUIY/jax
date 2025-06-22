@@ -46,6 +46,8 @@ build:linux --copt=-Wno-unknown-warning-option
 # See https://github.com/tensorflow/tensorflow/issues/39467
 build:linux --copt=-Wno-stringop-truncation
 build:linux --copt=-Wno-array-parameter
+build:linux --copt=-Wno-deprecated-register
+build:linux --copt=-Wno-register
 
 build:macos --config=posix
 build:macos --apple_platform_type=macos
@@ -98,9 +100,23 @@ build:windows --incompatible_strict_action_env=true
 # configs such as `avx_linux` and `mkl_open_source_only`, `ci_linux_x86_64_cuda`
 # inherits `cuda` and `build_cuda_with_nvcc`, etc.
 # #############################################################################
+build --repo_env=USE_PYWRAP_RULES=True
+build --copt=-DGRPC_BAZEL_BUILD
+build --host_copt=-DGRPC_BAZEL_BUILD
+build --action_env=GRPC_BAZEL_RUNTIME=1
+build --repo_env=PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=upb
+build --action_env=PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=upb
+build --repo_env=RULES_PYTHON_ENABLE_PYSTAR=0
+
+# Do not do this. If enabled protobuf's core internal target 
+# @com_google_protobuf//python:protobuf_python will start depending on a bunch
+# of cc_binary shared libraries artifacts, which will mess with how we link 
+# protobuf dependencies ourselves. By default this value is false, but some 
+# projects enable it, which we don't want here.
+# build --define=use_fast_cpp_protos=true
+
 build:nonccl --define=no_nccl_support=true
 
-build --repo_env USE_PYWRAP_RULES=1
 build:posix --copt=-fvisibility=hidden
 build:posix --copt=-Wno-sign-compare
 build:posix --cxxopt=-std=c++17
@@ -146,13 +162,15 @@ build:cuda --repo_env HERMETIC_CUDA_COMPUTE_CAPABILITIES="sm_50,sm_60,sm_70,sm_8
 build:cuda --crosstool_top=@local_config_cuda//crosstool:toolchain
 build:cuda --@local_config_cuda//:enable_cuda
 
-# Default hermetic CUDA and CUDNN versions.
+# Default hermetic CUDA, CUDNN and NVSHMEM versions.
 build:cuda --repo_env=HERMETIC_CUDA_VERSION="12.8.0"
 build:cuda --repo_env=HERMETIC_CUDNN_VERSION="9.8.0"
+build:cuda --repo_env=HERMETIC_NVSHMEM_VERSION="3.2.5"
 build:cuda --@local_config_cuda//cuda:include_cuda_libs=true
 
-# This config is used for building targets with CUDA libraries from stubs.
+# This config is used for building targets with CUDA/NVSHMEM libraries from stubs.
 build:cuda_libraries_from_stubs --@local_config_cuda//cuda:include_cuda_libs=false
+build:cuda_libraries_from_stubs --@local_config_nvshmem//:include_nvshmem_libs=false
 
 # Force the linker to set RPATH, not RUNPATH. When resolving dynamic libraries,
 # ld.so prefers in order: RPATH, LD_LIBRARY_PATH, RUNPATH. JAX sets RPATH to
@@ -332,6 +350,7 @@ build:rbe_linux_x86_64_cuda --config=ci_linux_x86_64_cuda
 build:rbe_linux_x86_64_cuda --repo_env=REMOTE_GPU_TESTING=1
 # Speed up CUDA repos creation by downloading ".tar" dists from the mirror.
 build:rbe_linux_x86_64_cuda --repo_env=USE_CUDA_TAR_ARCHIVE_FILES=1
+build:rbe_linux_x86_64_cuda --repo_env=USE_NVSHMEM_TAR_ARCHIVE_FILES=1
 
 # RBE configs for Windows
 # Set the remote worker pool

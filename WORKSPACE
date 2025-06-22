@@ -25,7 +25,6 @@ python_init_repositories(
     ],
     local_wheel_workspaces = ["//jaxlib:jax.bzl"],
     requirements = {
-        "3.10": "//build:requirements_lock_3_10.txt",
         "3.11": "//build:requirements_lock_3_11.txt",
         "3.12": "//build:requirements_lock_3_12.txt",
         "3.13": "//build:requirements_lock_3_13.txt",
@@ -145,3 +144,30 @@ load(
 )
 
 nccl_configure(name = "local_config_nccl")
+
+load(
+    "@xla//third_party/nvshmem/hermetic:nvshmem_json_init_repository.bzl",
+    "nvshmem_json_init_repository",
+)
+
+nvshmem_json_init_repository()
+
+load(
+    "@nvshmem_redist_json//:distributions.bzl",
+    "NVSHMEM_REDISTRIBUTIONS",
+)
+load(
+    "@xla//third_party/nvshmem/hermetic:nvshmem_redist_init_repository.bzl",
+    "nvshmem_redist_init_repository",
+)
+
+nvshmem_redist_init_repository(
+    nvshmem_redistributions = NVSHMEM_REDISTRIBUTIONS,
+)
+
+load(
+    "@xla//third_party/nvshmem/hermetic:nvshmem_configure.bzl",
+    "nvshmem_configure",
+)
+
+nvshmem_configure(name = "local_config_nvshmem")

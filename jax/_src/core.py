@@ -88,8 +88,7 @@ DebugInfo = lu.DebugInfo
 
 class Jaxpr:
   __slots__ = ['__weakref__', '_constvars', '_invars', '_outvars', '_eqns',
-               '_effects', '_debug_info', '_is_high',
-               '_initial_typechange_env', '_final_typechange_env']
+               '_effects', '_debug_info', '_is_high']
 
   _constvars: list[Var]
   _invars: list[Var]
@@ -98,8 +97,6 @@ class Jaxpr:
   _effects: Effects
   _debug_info: DebugInfo
   _is_high: bool
-  _initial_typechange_env: dict[Var, Any]
-  _final_typechange_env: dict[Var, Any]
 
   @property
   def constvars(self) -> list[Var]:
@@ -129,14 +126,6 @@ class Jaxpr:
   def is_high(self) -> bool:
     return self._is_high
 
-  @property
-  def initial_typechange_env(self) -> dict[Var, Any]:
-    return self._initial_typechange_env
-
-  @property
-  def final_typechange_env(self) -> dict[Var, Any]:
-    return self._final_typechange_env
-
   def __init__(self, constvars: Sequence[Var], invars: Sequence[Var],
                outvars: Sequence[Atom], eqns: Sequence[JaxprEqn],
                effects: Effects = no_effects,
@@ -145,8 +134,6 @@ class Jaxpr:
                # is missing.
                debug_info: DebugInfo = None,  # type: ignore[annotation-type-mismatch,assignment]
                is_high: bool = False,
-               initial_typechange_env: dict | None = None,
-               final_typechange_env: dict | None = None,
                ):
     """
     Args:
@@ -172,8 +159,7 @@ class Jaxpr:
     # assert (len(debug_info.arg_names) == len(invars)), (debug_info, invars)
     # assert (len(debug_info.result_paths) == len(outvars)), (debug_info, outvars)
     self._is_high = is_high
-    self._initial_typechange_env = initial_typechange_env or {}
-    self._final_typechange_env = final_typechange_env or {}
+    num_vars = len(constvars) + len(invars)
 
   def __str__(self):
     return str(self.pretty_print())
@@ -201,10 +187,6 @@ class Jaxpr:
         effects=kwargs.pop("effects", self.effects),
         debug_info=kwargs.pop("debug_info", self.debug_info),
         is_high=kwargs.pop("is_high", self.is_high),
-        initial_typechange_env=kwargs.pop("initial_typechange_env",
-                                          self.initial_typechange_env),
-        final_typechange_env=kwargs.pop("final_typechange_env",
-                                        self.final_typechange_env),
     )
     if kwargs:
       raise ValueError(f"Unknown keyword arguments: {kwargs}")
@@ -232,22 +214,6 @@ def subjaxprs(jaxpr: Jaxpr) -> Iterator[Jaxpr]:
     yield from jaxprs_in_params(eqn.params)
 
 
-@dataclass(frozen=True)
-class TypeChange:
-  aval: AbstractValue
-  initial_type_state: Any
-  final_type_state: Any
-
-  def to_tangent_aval(self):
-    return TypeChange(self.aval.to_tangent_aval(),
-                      self.initial_type_state.to_tangent_aval(),
-                      self.final_type_state.to_tangent_aval())
-
-  def normalize(self):
-    return TypeChange(self.aval.normalize(),
-                      self.initial_type_state.normalize(),
-                      self.final_type_state.normalize())
-
 class ClosedJaxpr:
   __slots__ = ['__weakref__', '_jaxpr', '_consts']
 
@@ -268,10 +234,13 @@ class ClosedJaxpr:
     return [v.aval for v in self.jaxpr.invars]
 
   @property
-  def in_avals_aug(self):
-    ienv = self.jaxpr.initial_typechange_env
-    fenv = self.jaxpr.final_typechange_env
-    return [TypeChange(v.aval, ienv[v], fenv[v]) if v.aval.mutable else v.aval
+  def in_aval_qdds(self) -> list[AbstractValue | AvalQDD]:
+    return [v.aval if v.initial_qdd is None else AvalQDD(v.aval, v.initial_qdd)
+            for v in self.jaxpr.invars]
+
+  @property
+  def final_aval_qdds(self) -> list[AbstractValue | AvalQDD]:
+    return [v.aval if v.final_qdd is None else AvalQDD(v.aval, v.final_qdd)
             for v in self.jaxpr.invars]
 
   @property
@@ -464,28 +433,31 @@ def new_jaxpr_eqn(invars, outvars, primitive, params, effects, source_info=None,
 _var_counter = it.count()
 
 class Var:
-  __slots__ = ["count", "suffix", "aval"]
+  __slots__ = ["count", "aval", "initial_qdd", "final_qdd"]
 
   count: int
-  suffix: str
   aval: AbstractValue
+  # these are only useful for jaxpr binders but rather than create a separate
+  # type for those, breaking existing interpreters, we add fields here.
+  initial_qdd : QuasiDynamicData | None
+  final_qdd : QuasiDynamicData | None
 
-  def __init__(self, suffix: str, aval: AbstractValue):
+  def __init__(self, aval: AbstractValue, initial_qdd = None, final_qdd = None):
+    assert isinstance(aval, AbstractValue)
     self.count = next(_var_counter)
-    self.suffix = suffix
     self.aval = aval
+    self.initial_qdd = initial_qdd
+    self.final_qdd = final_qdd
 
   def __repr__(self):
-    return f'Var(id={id(self)}){self.suffix}:{self.aval.str_short()}'
+    return f'Var(id={id(self)}):{self.aval.str_short()}'
 
   def pretty_print(self, context: JaxprPpContext, *, print_dtype: bool = True):
     del print_dtype  # unused
-    return f"{context.var_names[self]}{self.suffix}"
+    return f"{context.var_names[self]}"
 
 
-def gensym(suffix: str = '') -> Callable[[AbstractValue], Var]:
-  """Produce distinct variables, printed with the optional suffix."""
-  return partial(Var, suffix)
+gensym = lambda: Var
 
 # In a jaxpr, `dropvar` can appear in place of a bound variable to indicate that
 # the assignment is dropped, i.e. that an expression's output value will never
@@ -493,7 +465,7 @@ def gensym(suffix: str = '') -> Callable[[AbstractValue], Var]:
 # treat it as a special case of one. Its `aval` is similarly inexact.
 class DropVar(Var):
   def __init__(self, aval: AbstractValue):
-    super().__init__('', aval)
+    super().__init__(aval)
   def __repr__(self): return '_'
   def pretty_print(self, context: JaxprPpContext, *, print_dtype: bool = True):
     del context, print_dtype  # unused
@@ -703,7 +675,7 @@ class Trace(Generic[TracerType]):
     return not self._invalidated
 
   def __repr__(self):
-    return '{}'.format(self.__class__.__name__)
+    return f'{self.__class__.__name__}'
 
   def process_call(self, call_primitive, f, tracers, params):
     msg = (f"{type(self)} must override process_call to handle call-like "
@@ -1114,6 +1086,8 @@ class EvalTrace(Trace):
     del primitive, fwd, bwd, _  # Unused.
     return fun.call_wrapped(*tracers)
 
+  def cur_qdd(self, x):
+    return x.cur_qdd()
 
 class TraceTag:
   # TODO: this works for surprisingly subtle reasons. Function transformations
@@ -1505,7 +1479,7 @@ def definitely_equal(x, y):
 class AbstractValue:
   __slots__: list[str] = []
   is_high = False
-  mutable = False
+  has_qdd = False
 
   def to_tangent_aval(self):
     raise NotImplementedError("must override")
@@ -1524,6 +1498,9 @@ class AbstractValue:
   def update_weak_type(self, weak_type):
     return self
 
+  def update_vma(self, vma):
+    return self
+
   def strip_weak_type(self) -> AbstractValue:
     return self.update_weak_type(False)
 
@@ -1532,6 +1509,12 @@ class AbstractValue:
 
   def update(self, **kwargs):
     raise NotImplementedError("must override")
+
+  def lo_ty(self):
+    raise NotImplementedError("must override")
+
+  def lo_ty_qdd(self, qdd):
+    raise NotImplementedError("avals with qdd must override")
 
   def str_short(self, short_dtypes=False, mesh_axis_types=False):
     return str(self)
@@ -1703,6 +1686,54 @@ def concrete_dim_or_error(val: Any, context=""):
     return val
   else:
     return concrete_or_error(operator.index, val, context=context)
+
+### Quasi-dynamic data
+
+# Quasi-dynamic data includes things like liveness bits and the content type of
+# a type-changeable box. These change throughout the program but at a given
+# point in the program they have a single statically known value.
+
+class MutableQuasiDynamicData:
+  def __init__(self, val : QuasiDynamicData | None):
+    self.init_val = val
+    self.cur_val = val  # immutable payload
+
+  def update(self, val):
+    self.cur_val = val
+
+class QuasiDynamicData:
+  pass
+
+@dataclass(frozen=True)
+class AvalQDD:
+  aval: AbstractValue
+  qdd: QuasiDynamicData | None # immutable
+
+  has_qdd = True
+  def lo_ty(self):
+    return self.aval.lo_ty_qdd(self.qdd)  # type: ignore
+
+  def read_loval(self, val):
+    return self.aval.read_loval(self.qdd, val)  # type: ignore
+
+  def new_from_loval(self, *lovals):
+    return self.aval.new_from_loval(self.qdd, *lovals)  # type: ignore
+
+  def to_tangent_aval(self):
+    return AvalQDD(self.aval.to_tangent_aval(), self.qdd.to_tangent_qdd())
+
+@dataclass(frozen=True)
+class AvalMutableQDD:
+  aval: AbstractValue
+  mutable_qdd: MutableQuasiDynamicData
+
+def cur_qdd(x):
+  prev_trace = trace_ctx.trace
+  trace_ctx.set_trace(eval_trace)
+  try:
+    return prev_trace.cur_qdd(x)
+  finally:
+    trace_ctx.set_trace(prev_trace)
 
 ### Extended dtypes
 #
@@ -1907,10 +1938,10 @@ def get_cur_mesh_sharding(spec=None):
 def _make_lengths_same(sharding, ndim):
   pspec = sharding.spec
   if ndim > len(pspec):
-    return sharding.with_spec(pspec._normalized_spec_for_aval(ndim))
+    return sharding.update(spec=pspec._normalized_spec_for_aval(ndim))
   if ndim < len(pspec):
     assert all(s is None for s in pspec[ndim:]), (ndim, pspec)
-    return sharding.with_spec(P(*pspec[:ndim], unreduced=pspec.unreduced))
+    return sharding.update(spec=P(*pspec[:ndim], unreduced=pspec.unreduced))
   assert False, "unreachable"
 
 # TODO(yashkatariya): Only works with User/Auto. Generalize it to work with
@@ -1934,7 +1965,7 @@ def _maybe_modify_sharding(sharding, ndim):
   elif sharding.mesh._are_all_axes_explicit:
     out = sharding
   else:
-    out = sharding.with_spec(modify_spec_for_auto_manual(
+    out = sharding.update(spec=modify_spec_for_auto_manual(
         sharding.spec, sharding.mesh))
   if len(out.spec) != ndim:
     out = _make_lengths_same(out, ndim)
@@ -1989,12 +2020,13 @@ def str_short_aval(shape, dtype, mesh, spec, vma,
   vma_ur = _vma_ur_str(vma, spec.unreduced)
   return f'{dt_str}[{shapestr}]{vma_ur}{mesh_axes}'
 
+@cache(max_size=4096, trace_context_in_key=False)
 def get_vma(vma, mesh):
   if mesh.empty:
     return vma
-  axis_env_names = get_axis_env().axis_names()
+  axis_env = get_axis_env()
   for i in vma:
-    if i in axis_env_names and i not in mesh._name_to_type:
+    if axis_env.axis_exists(i) and i not in mesh._name_to_type:
       continue
     if mesh._name_to_type[i] != AxisType.Manual:
       raise ValueError(
@@ -2002,6 +2034,14 @@ def get_vma(vma, mesh):
           f" be of type `Manual`. Got axis: {i} of type {mesh._name_to_type[i]}")
   assert isinstance(vma, frozenset)
   return vma
+
+
+class SingleSideCollectiveEffect(effects.Effect):
+  __str__ = lambda _: "one-sided communication"
+
+
+single_side_collective_effect = SingleSideCollectiveEffect()
+effects.control_flow_allowed_effects.add_type(SingleSideCollectiveEffect)
 
 class ShapedArray(UnshapedArray):
   __slots__ = ['shape', 'sharding', 'vma']  # inherits slots from parent
@@ -2013,6 +2053,8 @@ class ShapedArray(UnshapedArray):
     self.dtype = _dtype_object(dtype)
     self.weak_type = weak_type
     self.sharding = get_sharding(sharding, self.shape)
+    # short for varying_manual_axes. See docs at
+    # https://docs.jax.dev/en/latest/notebooks/shard_map.html#tracking-how-values-vary-over-manual-mesh-axes-and-check-vma-true
     self.vma = get_vma(vma, self.sharding.mesh)
 
   def lower_val(self, val): return [val]
@@ -2061,6 +2103,12 @@ class ShapedArray(UnshapedArray):
         self.shape, primal_dtype_to_tangent_dtype(self.dtype),
         self.weak_type, sharding=self.sharding, vma=self.vma)
 
+  def to_cotangent_aval(self):
+    dtype = primal_dtype_to_tangent_dtype(self.dtype)
+    sharding = primal_sharding_to_cotangent_sharding(self.sharding)
+    return ShapedArray(
+        self.shape, dtype, self.weak_type, sharding=sharding, vma=self.vma)
+
   def str_short(self, short_dtypes=False, mesh_axis_types=False):
     return str_short_aval(
         self.shape, self.dtype, self.sharding.mesh, self.sharding.spec,
@@ -2071,6 +2119,9 @@ class ShapedArray(UnshapedArray):
       return self.shape[0]
     except IndexError as err:
       raise TypeError("len() of unsized object") from err  # same as numpy error
+
+  def update_vma(self, vma):
+    return self.update(vma=vma)
 
 
 def _get_shape_sharding_str(shape, spec):
@@ -2106,11 +2157,15 @@ def primal_dtype_to_tangent_dtype(primal_dtype):
   else:
     return primal_dtype
 
+def primal_sharding_to_cotangent_sharding(sharding):
+  new_spec = P(*sharding.spec, unreduced=sharding.spec.reduced,
+               reduced=sharding.spec.unreduced)
+  return sharding.update(spec=new_spec)
 
 def pvary(x, axis_name):
-  axes = (axis_name,) if not isinstance(axis_name, tuple) else axis_name
   if not axis_name:
     return x
+  axes = (axis_name,) if not isinstance(axis_name, tuple) else axis_name
   xs, treedef = tree_flatten(x)
   ys = pvary_p.bind(*xs, axes=axes, axis_index_groups=None)
   return tree_unflatten(treedef, ys)
@@ -2146,8 +2201,12 @@ def standard_insert_pvary(*args):
   in_vma = [frozenset() if (aval := get_aval(a)) is abstract_token
             else aval.vma for a in args]  # pytype: disable=attribute-error
   out_vma = frozenset.union(*in_vma)
-  return [pvary(arg, tuple(n for n in out_vma if n not in src))
-          if out_vma - src else arg for arg, src in zip(args, in_vma)]
+  return [
+      pvary(arg, tuple(n for n in out_vma if n not in src))
+      if isinstance(get_aval(arg), ShapedArray) and out_vma - src
+      else arg
+      for arg, src in zip(args, in_vma)
+  ]
 
 def standard_vma_rule(prim_name, *avals, **kwargs) -> frozenset[AxisName]:
   if not config._check_vma.value:
@@ -2155,7 +2214,7 @@ def standard_vma_rule(prim_name, *avals, **kwargs) -> frozenset[AxisName]:
   avals = tuple(a for a in avals if a is not abstract_token)
   if not avals:
     return frozenset()
-  vma, *vmas = [a.vma for a in avals]
+  vma, *vmas = (a.vma for a in avals)
   if not all(vma == vma_ for vma_ in vmas):
     raise ValueError(
         f'Primitive {prim_name} requires varying manual axes '
@@ -2224,11 +2283,15 @@ class DShapedArray(UnshapedArray):
             and self.weak_type == other.weak_type)
 
   def __hash__(self):
-    return hash((self.shape, self.dtype, self.weak_type))
+    # We don't hash the contents of the shape because it may contain tracers.
+    return hash((len(self.shape), self.dtype, self.weak_type))
 
   def to_tangent_aval(self):
     return DShapedArray(self.shape, primal_dtype_to_tangent_dtype(self.dtype),
                         self.weak_type)
+
+  def update_vma(self, vma):
+    return self
 
 
 class DArray:
@@ -2317,6 +2380,7 @@ class MutableArray:
   dtype = property(lambda self: self._aval.dtype)
   sharding = property(lambda self: self._buf.sharding)
   format = property(lambda self: self._buf.format)
+  committed = _committed = property(lambda self: self._buf._committed)
   def __getitem__(self, idx): return self._aval._getitem(self, idx)
   def __setitem__(self, idx, x): return self._aval._setitem(self, idx, x)
   def __repr__(self) -> str: return 'Mutable' + repr(self[...])
@@ -2393,6 +2457,9 @@ def is_symbolic_dim(v: Any) -> bool:
 
 def is_constant_dim(d: DimSize) -> bool:
   # Whether the dimension is a static integer constant.
+  # Try using a fast path for non-concrete Tracers.
+  if isinstance(d, Tracer) and not is_concrete(d):
+    return False
   try:
     operator.index(d)
     return True
@@ -2719,7 +2786,7 @@ def _map_shaped_array(
   # assert axis is None or aval.shape[axis] == size
   if axis is None:
     return aval
-  sharding = aval.sharding.with_spec(tuple_delete(aval.sharding.spec, axis))
+  sharding = aval.sharding.update(spec=tuple_delete(aval.sharding.spec, axis))
   return ShapedArray(tuple_delete(aval.shape, axis), aval.dtype,
                      weak_type=aval.weak_type, sharding=sharding, vma=aval.vma)
 
@@ -2728,7 +2795,7 @@ def _unmap_shaped_array(
     ) -> ShapedArray:
   if axis is None: return aval
   elif type(axis) is int:
-    sharding = aval.sharding.with_spec(tuple_insert(
+    sharding = aval.sharding.update(spec=tuple_insert(
         aval.sharding.spec, axis, explicit_mesh_axis))
     return ShapedArray(tuple_insert(aval.shape, axis, size), aval.dtype,
                        weak_type=aval.weak_type, sharding=sharding,
@@ -2917,15 +2984,19 @@ def check_jaxpr(jaxpr: Jaxpr):
     from jax.experimental.key_reuse._core import check_key_reuse_jaxpr  # pytype: disable=import-error
     check_key_reuse_jaxpr(jaxpr)
 
+# A place to track the quasi-dynamic data associated with a variable during typechecking
+@dataclass(frozen=True)
+class MutableTypecheckVal:
+  aval : AbstractValue
+  mutable_qdd : MutableQuasiDynamicData
 
 def _check_jaxpr(
     ctx_factory: Callable[[], tuple[JaxprPpContext, JaxprPpSettings]],
     jaxpr: Jaxpr
   ) -> None:
-  # Use set of variables to types to check that variables are in scope.
-  env: set[Var] = set()
+  env: dict[Var, Atom | MutableTypecheckVal] = {}
 
-  def read(x: Atom) -> Atom:
+  def read(x: Atom) -> Atom | MutableTypecheckVal:
     # Check the type annotation is itself well-typed.
     check_type(ctx_factory, env, x.aval)
     if isinstance(x, Var):
@@ -2933,7 +3004,7 @@ def _check_jaxpr(
       if x not in env:
         ctx, _ = ctx_factory()
         raise JaxprTypeError(f"Variable '{pp_var(x, ctx)}' not defined")
-      return x
+      return env[x]
     elif isinstance(x, Literal):
       # Check that the literal matches its type annotation.
       if not typecheck(x.aval, x.val):
@@ -2945,7 +3016,8 @@ def _check_jaxpr(
     else:
       assert False, "syntactically invalid jaxpr"
 
-  def write(v: Var, a: AbstractValue) -> None:
+  def write(v: Var, a: AvalQDD) -> None:
+    aval, qdd = a.aval, a.qdd
     assert isinstance(v, Var), "syntactically invalid jaxpr"
     # Check the type annotation of the binder is itself well-typed.
     check_type(ctx_factory, env, v.aval)
@@ -2954,19 +3026,23 @@ def _check_jaxpr(
       ctx, _ = ctx_factory()
       raise JaxprTypeError(f"Variable '{pp_var(v, ctx)}' already bound")
     # Check that the computed type is consistent with the binder annotation.
-    if not typematch(v.aval, a):
+    if not typematch(v.aval, aval):
       ctx, _ = ctx_factory()
       raise JaxprTypeError(
           f"Value for variable '{pp_var(v, ctx)}' inconsistently typed "
-          f"as {pp_aval(a, ctx)} for let-binder of type {pp_aval(v.aval, ctx)}")
+          f"as {pp_aval(aval, ctx)} for let-binder of type {pp_aval(v.aval, ctx)}")
+
     # If the variable is not a DropVar, add it to the environment.
     if not isinstance(v, DropVar):
-      env.add(v)
+      if qdd is None:
+        env[v] = v
+      else:
+        env[v] = MutableTypecheckVal(aval, MutableQuasiDynamicData(qdd))
 
   # Check type annotations on lambda binders.
   for v in it.chain(jaxpr.constvars, jaxpr.invars):
     check_type(ctx_factory, env, v.aval)
-    write(v, v.aval)
+    write(v, AvalQDD(v.aval, v.initial_qdd))
 
   # Check each eqn.
   sentinel = object()
@@ -2976,7 +3052,8 @@ def _check_jaxpr(
     prim = eqn.primitive
     try:
       in_atoms = map(read, eqn.invars)
-      in_avals = [x.aval for x in in_atoms]  # use in_atoms for dyn shapes
+      in_avals = [AvalMutableQDD(x.aval, x.mutable_qdd) if isinstance(x, MutableTypecheckVal)
+                  else x.aval for x in in_atoms]  # use in_atoms for dyn shapes
 
       # Compute the type of the primitive application.
       with eqn.ctx.manager:
@@ -3026,6 +3103,7 @@ def _check_jaxpr(
 
       # Check out_type matches the let-binders' annotation (after substitution).
       out_type = substitute_vars_in_output_ty(out_type, eqn.invars, eqn.outvars)
+      out_type = [t if isinstance(t, AvalQDD) else AvalQDD(t, None) for t in out_type]
       foreach(write, eqn.outvars, out_type)
 
     except JaxprTypeError as e:
@@ -3041,7 +3119,7 @@ def _check_jaxpr(
 
 def check_type(
     ctx_factory: Callable[[], tuple[JaxprPpContext, JaxprPpSettings]],
-    env: set[Var],
+    env: dict[Var, Atom | MutableTypecheckVal],
     ty: AbstractValue,
   ) -> None:
   if isinstance(ty, DShapedArray):
@@ -3111,7 +3189,7 @@ def _check_call(ctx_factory, prim, in_atoms, params):
                          f"{len(call_jaxpr.invars)} inputs")
 
   # Check `call_jaxpr` can be applied to in_atoms.
-  env: dict[Var, Atom] = {}
+  env: dict[Var, Atom | MutableTypecheckVal] = {}
   def substitute(aval: AbstractValue):
     if isinstance(aval, DShapedArray):
       aval = aval.update(shape=tuple(env.get(d, d) for d in aval.shape))  # type: ignore
@@ -3122,7 +3200,7 @@ def _check_call(ctx_factory, prim, in_atoms, params):
       raise JaxprTypeError(f"Call primitive {prim} passes operand {x} of type "
                            f"{x.aval} to jaxpr expecting type "
                            f"{substitute(v.aval)}")
-    env[v] = x if type(x) is Var else x.val
+    env[v] = x.val if type(x) is Literal else x
 
   _check_jaxpr(ctx_factory, call_jaxpr)
 
@@ -3328,13 +3406,13 @@ def pp_kv_pair(k:str, v: Any, context: JaxprPpContext, settings: JaxprPpSettings
 def pp_kv_pairs(kv_pairs, context: JaxprPpContext, settings: JaxprPpSettings) -> pp.Doc:
   if not kv_pairs:
     return pp.nil()
-  return pp.group(
+  return pp.group(pp.concat([
     pp.nest(2, pp.concat([
       pp.text("["),  pp.brk(""),
       pp.join(pp.brk(), [pp_kv_pair(k, v, context, settings) for k, v in kv_pairs])
-    ]))
-    + pp.brk("") + pp.text("]")
-  )
+    ])),
+    pp.brk(""), pp.text("]")
+  ]))
 
 def pp_eqn(eqn: JaxprEqn, context: JaxprPpContext, settings: JaxprPpSettings
            ) -> pp.Doc:
@@ -3355,7 +3433,7 @@ def _pp_eqn(eqn: JaxprEqn, context: JaxprPpContext, settings: JaxprPpSettings,
   rhs = [pp.text(eqn.primitive.name, annotation=name_stack_annotation),
          pp_kv_pairs([(p, eqn.params[p]) for p in params], context, settings),
          pp.text(" ") + pp_vars(eqn.invars, context)]
-  if lhs.format():
+  if eqn.outvars:
     return pp.concat([lhs, pp.text(" = ", annotation=annotation), *rhs])
   else:
     return pp.concat(rhs)
@@ -3450,10 +3528,10 @@ def pp_jaxpr(
 def pp_jaxprs(jaxprs: Sequence[ClosedJaxpr | Jaxpr],
               context: JaxprPpContext, settings: JaxprPpSettings) -> pp.Doc:
   jaxprs = [j.jaxpr if isinstance(j, ClosedJaxpr) else j for j in jaxprs]
-  return pp.group(pp.nest(2, pp.concat([
+  return pp.group(pp.concat([pp.nest(2, pp.concat([
       pp.text('('), pp.brk(""),
       pp.join(pp.brk(), map(lambda x: pp_jaxpr(x, context, settings), jaxprs))]
-    )) + pp.brk("") + pp.text(')')
+    )), pp.brk(""), pp.text(')')])
   )
 
 

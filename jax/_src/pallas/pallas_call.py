@@ -32,6 +32,7 @@ from jax._src import effects
 from jax._src import linear_util as lu
 from jax._src import state
 from jax._src import tree_util
+from jax._src.frozen_dict import FrozenDict
 from jax._src.interpreters import ad
 from jax._src.interpreters import batching
 from jax._src.interpreters import mlir
@@ -909,7 +910,7 @@ def _pallas_call_batching_rule(
 
   batched_out_avals = []
   for aval in out_avals:
-    sharding = aval.sharding.with_spec(tuple_insert(aval.sharding.spec, 0, None))
+    sharding = aval.sharding.update(spec=tuple_insert(aval.sharding.spec, 0, None))
     shape = tuple_insert(aval.shape, 0, axis_size)
     batched_out_avals.append(aval.update(shape=shape, sharding=sharding))
   batched_out_avals = tuple(batched_out_avals)
@@ -1131,10 +1132,10 @@ def pallas_call_checkify_rule(error: checkify.Error,
   retrace_in_avals = [*shaped_scalar_avals, *error_memref_aval, *input_aval,
                       *error_memref_aval, *output_aval, *scratch_aval]
   jaxpr_flat_avals, jaxpr_in_tree = tree_util.tree_flatten(retrace_in_avals)
-  debug = api_util.debug_info("checkify_pallas", checked_kernel_fn,
+  debug_info = api_util.debug_info("checkify_pallas", checked_kernel_fn,
                               retrace_in_avals, {})
   wrapped_kernel_with_err, out_tree_thunk = api_util.flatten_fun_nokwargs(
-      lu.wrap_init(checked_kernel_fn, debug_info=debug), jaxpr_in_tree)
+      lu.wrap_init(checked_kernel_fn, debug_info=debug_info), jaxpr_in_tree)
 
   with pallas_core.tracing_grid_env(grid_mapping.grid, ()):
     final_jaxpr, _, _, () = pe.trace_to_jaxpr_dynamic(
@@ -1146,13 +1147,18 @@ def pallas_call_checkify_rule(error: checkify.Error,
   error_paths, _ = unzip2(tree_util.tree_flatten_with_path(error_block_specs)[0])
   error_origins = tuple(f"errors[{tree_util.keystr(p)}" for p in error_paths)
   error_block_mappings = map(
-        partial(
-            pallas_core._convert_block_spec_to_block_mapping,
-            index_map_avals=grid_mapping.index_map_avals,
-            index_map_tree=grid_mapping.index_map_tree,
-            grid=grid_mapping.grid,
-            mapped_dims=grid_mapping.vmapped_dims),
-        error_block_specs, error_origins, shaped_err_avals)
+      partial(
+          pallas_core._convert_block_spec_to_block_mapping,
+          index_map_avals=grid_mapping.index_map_avals,
+          index_map_tree=grid_mapping.index_map_tree,
+          grid=grid_mapping.grid,
+          mapped_dims=grid_mapping.vmapped_dims,
+          debug=True,
+      ),
+      error_block_specs,
+      error_origins,
+      shaped_err_avals,
+  )
   input_block_mappings, output_block_mappings = split_list(
       grid_mapping.block_mappings, [num_kernel_inputs,])
   grid_mapping_with_error = grid_mapping.replace(
@@ -1200,7 +1206,7 @@ def _trace_kernel_to_jaxpr(
   wrapped_kernel_fun = primitives.wrap_with_transforms(
       wrapped_kernel_fun, kernel_in_transforms
   )
-  with grid_mapping.trace_env():
+  with grid_mapping.trace_env(), config._check_vma(False):
     jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(wrapped_kernel_fun,
                                                      kernel_avals)
     if consts:
@@ -1345,6 +1351,16 @@ jax_core.custom_typechecks[pallas_call_p] = _pallas_call_typecheck_rule
 def _convert_out_shape_to_aval(out_shape: Any) -> jax_core.AbstractValue:
   match out_shape:
     case jax.ShapeDtypeStruct():
+      if config._check_vma.value:
+        if out_shape.vma is None:
+          raise ValueError(
+              "When `check_vma=True` on `jax.shard_map`, `vma` on"
+              " `jax.ShapeDtypeStruct` must not be `None`. Please specify how the"
+              " output should be varying across mesh axes using the `vma`"
+              " argument of `jax.ShapeDtypeStruct` or set `check_vma=False` on"
+              " `jax.shard_map`.")
+        return jax_core.ShapedArray(
+            shape=out_shape.shape, dtype=out_shape.dtype, vma=out_shape.vma)
       return jax_core.ShapedArray(shape=out_shape.shape, dtype=out_shape.dtype)
     case pallas_core.MemoryRef():
       return out_shape.get_array_aval()
@@ -1396,7 +1412,9 @@ def _pallas_call_state_discharge_rule(
           index_map_tree=grid_mapping.index_map_tree,
           grid=grid_mapping.grid,
           mapped_dims=grid_mapping.mapped_dims,
-          ) for ref_aval, block_spec in zip(ref_avals, ref_block_specs)
+          debug=debug,
+      )
+      for ref_aval, block_spec in zip(ref_avals, ref_block_specs)
   ]
   in_block_mappings, out_block_mappings = split_list(
       grid_mapping.block_mappings, [grid_mapping.num_inputs]
@@ -1466,7 +1484,7 @@ def _pallas_call_state_discharge_rule(
       *ref_args,
       *rest_args,
       jaxpr=new_jaxpr,
-      input_output_aliases=new_input_output_aliases,
+      input_output_aliases=tuple(new_input_output_aliases),
       grid_mapping=new_grid_mapping,
       mesh=mesh,
       debug=debug,
@@ -1495,7 +1513,7 @@ def pallas_call(
     interpret: Any = False,
     name: str | None = None,
     compiler_params: (
-        Mapping[Backend, "CompilerParams"] | "CompilerParams" | None
+        Mapping[Backend, pallas_core.CompilerParams] | pallas_core.CompilerParams | None
     ) = None,
     cost_estimate: CostEstimate | None = None,
     backend: Backend | None = None,
@@ -1591,11 +1609,12 @@ def pallas_call(
   )
 
 
+
 def _normalize_compiler_params(
-    compiler_params: Mapping[Backend, CompilerParams] | CompilerParams | None,
-) -> Mapping[Backend, CompilerParams]:
+    compiler_params: Mapping[Backend, pallas_core.CompilerParams] | pallas_core.CompilerParams | None,
+) -> Mapping[Backend, pallas_core.CompilerParams]:
   if compiler_params is None:
-    return {}
+    return FrozenDict({})
   if isinstance(compiler_params, CompilerParams):
     compiler_params = {compiler_params.BACKEND: compiler_params}
   assert isinstance(compiler_params, Mapping)
@@ -1611,6 +1630,8 @@ def _normalize_compiler_params(
           f"Inconsistent backend in compiler_params: {params.BACKEND} !="
           f" {backend}"
       )
+  if not isinstance(compiler_params, FrozenDict):
+    compiler_params = FrozenDict(compiler_params)
   return compiler_params
 
 
@@ -1665,13 +1686,22 @@ def _pallas_call(
     # TODO(necula): check that input_output_aliases is well-formed: no duplicates, etc.
     kernel_args, grid_mapping = pallas_core.get_grid_mapping(
         grid_spec,
-        flat_in_avals, in_tree, in_origins,
-        flat_out_avals, out_tree, out_origins)
+        flat_in_avals,
+        in_tree,
+        in_origins,
+        flat_out_avals,
+        out_tree,
+        out_origins,
+        debug,
+    )
     flat_kernel_args, kernel_in_tree = tree_util.tree_flatten(kernel_args)
     flat_kernel_avals = tuple(
         x.ref if isinstance(x, state_types.TransformedRef) else x
         for x in flat_kernel_args
     )
+    if config._check_vma.value:
+      flat_kernel_avals = tuple(a.update_vma(frozenset())
+                                for a in flat_kernel_avals)
     # Note that only a subset of all transforms can be found here, and they are
     # never expected to contain any arrays.
     kernel_arg_transforms = tuple(
@@ -1683,7 +1713,7 @@ def _pallas_call(
     if name is not None:
       kernel_dbg = kernel_dbg.replace_func_name(mlir.sanitize_name(name))
     jaxpr, consts = _trace_kernel_to_jaxpr(
-        kernel, kernel_dbg, grid_mapping, tuple(flat_kernel_avals),
+        kernel, kernel_dbg, grid_mapping, flat_kernel_avals,
         kernel_in_tree, kernel_arg_transforms)
     for i_idx, o_idx in input_output_aliases.items():
       if i_idx not in range(len(flat_in_avals)):

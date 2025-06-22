@@ -42,7 +42,6 @@ from jax._src import api_util
 from jax._src import config
 from jax._src import core
 from jax._src import custom_derivatives
-from jax._src import deprecations
 from jax._src import test_util as jtu
 from jax._src.interpreters import partial_eval as pe
 
@@ -2954,7 +2953,7 @@ class CustomVJPTest(jtu.JaxTestCase):
       return np.array([1.0])*x
 
     def fwd(x):
-      return np.array([2.0])*x*x/np.array([1.0]), (x,)
+      return np.array([2.0])*x*x/np.array([1.0]), (2 * x,)
 
     x = jnp.linspace(0, 5.0, 10)
     fwd = custom_derivatives.optimize_remat_of_custom_vjp_fwd(
@@ -2968,7 +2967,7 @@ class CustomVJPTest(jtu.JaxTestCase):
     def fun(x):
       return (np.array([1.0])*x)[0]
     def fwd(x):
-      return (np.array([2.0])*x*x/np.array([1.0]))[0], (x,)
+      return (np.array([2.0])*x*x/np.array([1.0]))[0], (2 * x,)
     x = jnp.linspace(0, 5.0, 10)
     fwd = custom_derivatives.optimize_remat_of_custom_vjp_fwd(
         fun, api_util.debug_info("custom_vjp fun", fun, (x,), {}),
@@ -2980,7 +2979,7 @@ class CustomVJPTest(jtu.JaxTestCase):
     def fun(x):
       return x
     def fwd(x):
-      return x*x, (x,)
+      return x*x, (2 * x,)
 
     x = jnp.linspace(0, 5.0, 10)
     fwd = custom_derivatives.optimize_remat_of_custom_vjp_fwd(
@@ -2997,7 +2996,7 @@ class CustomVJPTest(jtu.JaxTestCase):
     def fun(x):
       return x**2
     def fwd_(x):
-      return x*x, (x,)
+      return x*x, (2 * x,)
 
     fwd = custom_derivatives.optimize_remat_of_custom_vjp_fwd(
         fun, api_util.debug_info("custom_vjp fun", fun, (3.2,), {}),
@@ -3720,19 +3719,6 @@ class CustomTransposeTest(jtu.JaxTestCase):
     self.assertAllClose(f_t(x), jax.jit(f_t)(x))
     self.assertAllClose(f_(x), g_(x))
     self.assertAllClose(f_t(x), g_t(x))
-
-  def test_jit_signature_deprecation(self):
-    fun = lambda x: x
-    if deprecations.is_accelerated('jax-jit-positional-args'):
-      with self.assertRaisesRegex(TypeError, r'jit\(\) got some positional-only arguments passed as keyword arguments.*'):
-        jax.jit(fun=fun)
-      with self.assertRaisesRegex(TypeError, r'jit\(\) takes 1 positional argument but 2 were given.*'):
-        jax.jit(fun, None)
-    else:
-      with self.assertWarnsRegex(DeprecationWarning, r'jax\.jit: passing fun by keyword is deprecated.*'):
-        jax.jit(fun=fun)
-      with self.assertWarnsRegex(DeprecationWarning, r'jax\.jit: passing optional arguments by position is deprecated.*'):
-        jax.jit(fun, None)
 
   def test_cond(self):
     def f(x, y):

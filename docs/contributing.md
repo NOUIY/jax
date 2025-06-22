@@ -30,13 +30,13 @@ We do all of our development using git, so basic knowledge is assumed.
 Follow these steps to contribute code:
 
 1. Sign the [Google Contributor License Agreement (CLA)](https://cla.developers.google.com/).
-   For more information, see the Pull Request Checklist below.
+   For more information, see the {ref}`pr-checklist` below.
 
 2. Fork the JAX repository by clicking the **Fork** button on the
    [repository page](http://www.github.com/jax-ml/jax). This creates
    a copy of the JAX repository in your own account.
 
-3. Install Python >= 3.10 locally in order to run tests.
+3. Install Python >= 3.11 locally in order to run tests.
 
 4. `pip` installing your fork from source. This allows you to modify the code
    and immediately test it out:

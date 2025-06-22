@@ -48,6 +48,7 @@ py_library_providing_imports_info(
         "//jax:api",
         "//jax:core",
         "//jax:custom_derivatives",
+        "//jax:lax",
     ],
 )
 
@@ -61,8 +62,8 @@ pytype_strict_library(
     name = "backend",
     srcs = ["backend.py"],
     deps = [
-        "//jax",
         "//jax:api",
+        "//jax:util",
         "//jax:xla_bridge",
     ],
 )
@@ -91,7 +92,10 @@ pytype_strict_library(
 pytype_strict_library(
     name = "ffi",
     srcs = ["ffi.py"],
-    deps = ["//jax"],
+    deps = [
+        "//jax",
+        "//jax:ffi",
+    ],
 )
 
 pytype_strict_library(

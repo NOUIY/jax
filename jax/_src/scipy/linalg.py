@@ -26,10 +26,10 @@ from jax import jit, vmap, jvp
 from jax import lax
 from jax._src import dtypes
 from jax._src.lax import linalg as lax_linalg
-from jax._src.lax import qdwh
 from jax._src.numpy.util import (
     check_arraylike, promote_dtypes, promote_dtypes_inexact,
     promote_dtypes_complex)
+from jax._src.tpu.linalg import qdwh
 from jax._src.typing import Array, ArrayLike
 
 
@@ -485,6 +485,8 @@ def _schur(a: Array, output: str) -> tuple[Array, Array]:
 
 def schur(a: ArrayLike, output: str = 'real') -> tuple[Array, Array]:
   """Compute the Schur decomposition
+
+  Only implemented on CPU.
 
   JAX implementation of :func:`scipy.linalg.schur`.
 
@@ -1831,6 +1833,9 @@ def _sqrtm(A: ArrayLike) -> Array:
 
 def sqrtm(A: ArrayLike, blocksize: int = 1) -> Array:
   """Compute the matrix square root
+
+  This function is implemented using :func:`scipy.linalg.schur`, which is only
+  supported on CPU.
 
   JAX implementation of :func:`scipy.linalg.sqrtm`.
 
